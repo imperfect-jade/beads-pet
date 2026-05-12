@@ -1,0 +1,1 @@
+"""Optional image generation helpers."""
