@@ -8,7 +8,7 @@ from hatch_pet_tool.pipeline.run_image import run_image_pipeline
 
 
 def _sample_image(path):
-    image = Image.new("RGBA", (64, 64), (255, 255, 255, 255))
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     draw.rectangle((18, 12, 46, 48), fill=(230, 80, 90, 255), outline=(20, 20, 20, 255))
     draw.rectangle((26, 22, 30, 26), fill=(20, 20, 20, 255))
@@ -48,12 +48,16 @@ def test_run_image_pipeline_exports_flutter_assets(tmp_path, monkeypatch):
         crop="0,0,64,64",
         remove_bg="auto",
         max_input_side=64,
+        colors=8,
     )
 
     assert result["ok"] is True
     assert (run_dir / "input" / "clean.png").is_file()
+    assert (run_dir / "input" / "pixelized.png").is_file()
     assert result["clean_input"] == str(run_dir / "input" / "clean.png")
+    assert result["pixelized_input"] == str(run_dir / "input" / "pixelized.png")
     assert result["preprocess"]["remove_bg"]["mode"] == "auto"
+    assert result["pixelize"]["colors"]["requested_colors"] == 8
     assert (run_dir / "final" / "spritesheet.webp").is_file()
     assert (run_dir / "final" / "validation.json").is_file()
     assert (run_dir / "qa" / "contact-sheet.png").is_file()
@@ -67,3 +71,5 @@ def test_run_image_pipeline_exports_flutter_assets(tmp_path, monkeypatch):
     manifest = json.loads((flutter_dir / "beads-test_hatch_pet.json").read_text(encoding="utf-8"))
     assert manifest["image"] == "beads-test_hatch_spritesheet.webp"
     assert manifest["actions"]["idle"] == {"row": 0, "frames": 6, "fps": 6}
+    frames_manifest = json.loads((run_dir / "frames" / "frames-manifest.json").read_text(encoding="utf-8"))
+    assert frames_manifest["source_image"] == str(run_dir / "input" / "pixelized.png")

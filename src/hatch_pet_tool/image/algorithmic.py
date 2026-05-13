@@ -8,28 +8,11 @@ from PIL import Image
 
 from hatch_pet_tool.core.constants import ANIMATION_ROWS, CELL_HEIGHT, CELL_WIDTH
 
-BACKGROUND_THRESHOLD = 244
-ALPHA_THRESHOLD = 16
-
-
-def _is_background(red: int, green: int, blue: int, alpha: int) -> bool:
-    if alpha <= ALPHA_THRESHOLD:
-        return True
-    return red >= BACKGROUND_THRESHOLD and green >= BACKGROUND_THRESHOLD and blue >= BACKGROUND_THRESHOLD
-
-
 def source_to_sprite(path: Path) -> Image.Image:
     """Load one image and normalize it into a transparent 192x208 sprite frame."""
 
     with Image.open(path) as opened:
         image = opened.convert("RGBA")
-
-    pixels = image.load()
-    for y in range(image.height):
-        for x in range(image.width):
-            red, green, blue, alpha = pixels[x, y]
-            if _is_background(red, green, blue, alpha):
-                pixels[x, y] = (red, green, blue, 0)
 
     bbox = image.getbbox()
     if bbox is None:

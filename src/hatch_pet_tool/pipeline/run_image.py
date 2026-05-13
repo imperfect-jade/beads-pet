@@ -17,6 +17,7 @@ from hatch_pet_tool.image.algorithmic import generate_algorithmic_frames
 from hatch_pet_tool.image.compose import compose_from_frames, save_outputs
 from hatch_pet_tool.image.contact_sheet import main as _contact_sheet_main
 from hatch_pet_tool.image.input_image import DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
+from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, pixelize_image
 from hatch_pet_tool.image.validate import main as _validate_main
 
 import sys
@@ -49,7 +50,9 @@ def write_request(
     display_name: str,
     description: str,
     clean_image_path: Path,
+    pixelized_image_path: Path,
     preprocess: dict[str, object],
+    pixelize: dict[str, object],
 ) -> Path:
     request = {
         "pet_id": pet_id,
@@ -59,7 +62,9 @@ def write_request(
         "pipeline": "algorithmic-run-image",
         "source_image": str(image_path),
         "clean_image": str(clean_image_path),
+        "pixelized_image": str(pixelized_image_path),
         "preprocess": preprocess,
+        "pixelize": pixelize,
         "atlas": {
             "columns": COLUMNS,
             "rows": ROWS,
@@ -89,6 +94,7 @@ def run_image_pipeline(
     crop: str | None = None,
     remove_bg: str = "auto",
     max_input_side: int = DEFAULT_MAX_INPUT_SIDE,
+    colors: int = DEFAULT_COLORS,
     force: bool = False,
 ) -> dict[str, object]:
     if not image_path.is_file():
@@ -111,6 +117,12 @@ def run_image_pipeline(
         remove_bg=remove_bg,
         max_side=max_input_side,
     )
+    pixelized_input = input_dir / "pixelized.png"
+    pixelize = pixelize_image(
+        image_path=clean_input,
+        output_path=pixelized_input,
+        colors=colors,
+    )
 
     request_path = write_request(
         run_dir=run_dir,
@@ -119,9 +131,11 @@ def run_image_pipeline(
         display_name=display_name,
         description=description,
         clean_image_path=clean_input,
+        pixelized_image_path=pixelized_input,
         preprocess=preprocess,
+        pixelize=pixelize,
     )
-    frames_manifest = generate_algorithmic_frames(clean_input, frames_root)
+    frames_manifest = generate_algorithmic_frames(pixelized_input, frames_root)
     write_json(frames_root / "frames-manifest.json", frames_manifest)
 
     atlas = compose_from_frames(frames_root)
@@ -165,7 +179,9 @@ def run_image_pipeline(
         "run_dir": str(run_dir),
         "request": str(request_path),
         "clean_input": str(clean_input),
+        "pixelized_input": str(pixelized_input),
         "preprocess": preprocess,
+        "pixelize": pixelize,
         "spritesheet": str(spritesheet_webp),
         "validation": str(validation_path),
         "contact_sheet": str(contact_sheet),
@@ -187,6 +203,7 @@ def main() -> None:
     parser.add_argument("--crop", default="", help="Optional crop rectangle as x,y,w,h in source pixels.")
     parser.add_argument("--remove-bg", default="auto", help="Background removal: auto, none, or #RRGGBB.")
     parser.add_argument("--max-input-side", type=int, default=DEFAULT_MAX_INPUT_SIDE)
+    parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -217,6 +234,7 @@ def main() -> None:
         crop=args.crop or None,
         remove_bg=args.remove_bg,
         max_input_side=args.max_input_side,
+        colors=args.colors,
         force=args.force,
     )
     print(json.dumps(result, indent=2))

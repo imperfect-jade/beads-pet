@@ -16,7 +16,7 @@ python -m pip install -e .[dev]
 hatch-pet-tool run-image --image .\input\beads.png --pet-id beads-cat --display-name "Beads Cat"
 hatch-pet-tool run-image --image .\input\beads.jpg --remove-bg auto
 hatch-pet-tool run-image --image .\input\beads.webp --crop 120,80,640,640 --remove-bg "#FFFFFF"
-hatch-pet-tool run-image --image .\input\beads.png --remove-bg none --max-input-side 768
+hatch-pet-tool run-image --image .\input\beads.png --remove-bg none --max-input-side 768 --colors 16
 hatch-pet-tool prepare --pet-name Calico --reference .\input\cat.png
 hatch-pet-tool status --run-dir .\output\hatch-pet\calico-...
 hatch-pet-tool record --run-dir .\output\hatch-pet\calico-... --job-id base --source <imagegen-output.png>
@@ -24,17 +24,26 @@ hatch-pet-tool finalize --run-dir .\output\hatch-pet\calico-... --skip-package
 hatch-pet-tool export-flutter --run-dir .\output\hatch-pet\calico-...
 ```
 
-`run-image` is the default no-AI MVP path. It takes one image, creates
-algorithmic placeholder animation frames, validates the hatch-pet atlas, and
-exports Flutter assets. The animation is intentionally simple in this first
-version; later iterations can improve bead-grid detection, palette recovery, and
-motion quality.
+`run-image` is the default no-AI MVP path. It expects an input image that is
+already pixel-art or bead-art styled. The tool cleans the input, extracts the
+visible pixel/bead subject, normalizes it into a transparent `192x208` hatch-pet
+cell, creates algorithmic placeholder animation frames, validates the hatch-pet
+atlas, and exports Flutter assets. The animation is intentionally simple in this
+first version; later iterations can improve bead-grid detection, palette
+recovery, and motion quality.
 
 The `run-image` input preprocessor reads PNG/JPG/WebP, converts to RGBA, can crop
 with `--crop x,y,w,h`, scales large images by longest edge, and removes simple
 backgrounds with `--remove-bg auto` or an explicit `#RRGGBB`. The first version
 uses four-corner color sampling, so it works best with solid or near-solid
 backgrounds.
+
+After preprocessing, `run-image` writes `input/pixelized.png`. This step is not a
+general photo-to-pixel-art filter: it uses the transparent alpha mask to crop the
+subject, preserves hard pixel/bead edges with nearest-neighbor scaling, optionally
+caps visible colors with `--colors`, and centers the result in the hatch-pet
+cell. The first version does not perform perspective correction, grid-line
+detection, or round bead reconstruction from real-world photos.
 
 `export-flutter` writes to `output/flutter-assets/<pet_id>/` by default. It does
 not write into the Todolist project. Treat
@@ -79,6 +88,10 @@ Flutter exports use a Todolist-compatible manifest:
 - `src/hatch_pet_tool/flutter/`: Flutter asset export.
 - `src/hatch_pet_tool/image/algorithmic.py`: no-AI placeholder frame generation
   from one input image.
+- `src/hatch_pet_tool/image/input_image.py`: source image loading, cropping,
+  resizing, and simple background removal.
+- `src/hatch_pet_tool/image/pixelize.py`: pixel/bead subject extraction and
+  normalization into a hatch-pet cell.
 - `docs/reference/`: sprite and QA contracts.
 - `docs/legacy-skill/`: archived Codex skill metadata.
 - `scripts/`: backward-compatible thin wrappers for old script commands.
