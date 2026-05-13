@@ -16,6 +16,7 @@ from hatch_pet_tool.flutter.export import export_flutter_asset
 from hatch_pet_tool.image.algorithmic import generate_algorithmic_frames
 from hatch_pet_tool.image.compose import compose_from_frames, save_outputs
 from hatch_pet_tool.image.contact_sheet import main as _contact_sheet_main
+from hatch_pet_tool.image.input_image import DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
 from hatch_pet_tool.image.validate import main as _validate_main
 
 import sys
@@ -47,6 +48,8 @@ def write_request(
     pet_id: str,
     display_name: str,
     description: str,
+    clean_image_path: Path,
+    preprocess: dict[str, object],
 ) -> Path:
     request = {
         "pet_id": pet_id,
@@ -55,6 +58,8 @@ def write_request(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "pipeline": "algorithmic-run-image",
         "source_image": str(image_path),
+        "clean_image": str(clean_image_path),
+        "preprocess": preprocess,
         "atlas": {
             "columns": COLUMNS,
             "rows": ROWS,
@@ -81,6 +86,9 @@ def run_image_pipeline(
     description: str,
     run_dir: Path,
     flutter_output_dir: Path,
+    crop: str | None = None,
+    remove_bg: str = "auto",
+    max_input_side: int = DEFAULT_MAX_INPUT_SIDE,
     force: bool = False,
 ) -> dict[str, object]:
     if not image_path.is_file():
@@ -90,9 +98,19 @@ def run_image_pipeline(
 
     frames_root = run_dir / "frames"
     final_dir = run_dir / "final"
+    input_dir = run_dir / "input"
     qa_dir = run_dir / "qa"
     final_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
+    clean_input = input_dir / "clean.png"
+    preprocess = preprocess_input_image(
+        image_path=image_path,
+        output_path=clean_input,
+        crop=crop,
+        remove_bg=remove_bg,
+        max_side=max_input_side,
+    )
 
     request_path = write_request(
         run_dir=run_dir,
@@ -100,8 +118,10 @@ def run_image_pipeline(
         pet_id=pet_id,
         display_name=display_name,
         description=description,
+        clean_image_path=clean_input,
+        preprocess=preprocess,
     )
-    frames_manifest = generate_algorithmic_frames(image_path, frames_root)
+    frames_manifest = generate_algorithmic_frames(clean_input, frames_root)
     write_json(frames_root / "frames-manifest.json", frames_manifest)
 
     atlas = compose_from_frames(frames_root)
@@ -144,6 +164,8 @@ def run_image_pipeline(
         "ok": True,
         "run_dir": str(run_dir),
         "request": str(request_path),
+        "clean_input": str(clean_input),
+        "preprocess": preprocess,
         "spritesheet": str(spritesheet_webp),
         "validation": str(validation_path),
         "contact_sheet": str(contact_sheet),
@@ -162,6 +184,9 @@ def main() -> None:
     parser.add_argument("--description", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--flutter-output-dir", default="")
+    parser.add_argument("--crop", default="", help="Optional crop rectangle as x,y,w,h in source pixels.")
+    parser.add_argument("--remove-bg", default="auto", help="Background removal: auto, none, or #RRGGBB.")
+    parser.add_argument("--max-input-side", type=int, default=DEFAULT_MAX_INPUT_SIDE)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -189,6 +214,9 @@ def main() -> None:
         description=description,
         run_dir=run_dir,
         flutter_output_dir=flutter_output_dir,
+        crop=args.crop or None,
+        remove_bg=args.remove_bg,
+        max_input_side=args.max_input_side,
         force=args.force,
     )
     print(json.dumps(result, indent=2))

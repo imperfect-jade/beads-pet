@@ -45,9 +45,15 @@ def test_run_image_pipeline_exports_flutter_assets(tmp_path, monkeypatch):
         description="A test pet.",
         run_dir=run_dir,
         flutter_output_dir=flutter_dir,
+        crop="0,0,64,64",
+        remove_bg="auto",
+        max_input_side=64,
     )
 
     assert result["ok"] is True
+    assert (run_dir / "input" / "clean.png").is_file()
+    assert result["clean_input"] == str(run_dir / "input" / "clean.png")
+    assert result["preprocess"]["remove_bg"]["mode"] == "auto"
     assert (run_dir / "final" / "spritesheet.webp").is_file()
     assert (run_dir / "final" / "validation.json").is_file()
     assert (run_dir / "qa" / "contact-sheet.png").is_file()

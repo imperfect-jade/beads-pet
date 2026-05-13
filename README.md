@@ -14,6 +14,9 @@ python -m pip install -e .[dev]
 
 ```powershell
 hatch-pet-tool run-image --image .\input\beads.png --pet-id beads-cat --display-name "Beads Cat"
+hatch-pet-tool run-image --image .\input\beads.jpg --remove-bg auto
+hatch-pet-tool run-image --image .\input\beads.webp --crop 120,80,640,640 --remove-bg "#FFFFFF"
+hatch-pet-tool run-image --image .\input\beads.png --remove-bg none --max-input-side 768
 hatch-pet-tool prepare --pet-name Calico --reference .\input\cat.png
 hatch-pet-tool status --run-dir .\output\hatch-pet\calico-...
 hatch-pet-tool record --run-dir .\output\hatch-pet\calico-... --job-id base --source <imagegen-output.png>
@@ -26,6 +29,12 @@ algorithmic placeholder animation frames, validates the hatch-pet atlas, and
 exports Flutter assets. The animation is intentionally simple in this first
 version; later iterations can improve bead-grid detection, palette recovery, and
 motion quality.
+
+The `run-image` input preprocessor reads PNG/JPG/WebP, converts to RGBA, can crop
+with `--crop x,y,w,h`, scales large images by longest edge, and removes simple
+backgrounds with `--remove-bg auto` or an explicit `#RRGGBB`. The first version
+uses four-corner color sampling, so it works best with solid or near-solid
+backgrounds.
 
 `export-flutter` writes to `output/flutter-assets/<pet_id>/` by default. It does
 not write into the Todolist project. Treat
