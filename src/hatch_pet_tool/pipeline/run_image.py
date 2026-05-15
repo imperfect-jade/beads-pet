@@ -18,7 +18,9 @@ from hatch_pet_tool.image.compose import compose_from_frames, save_outputs
 from hatch_pet_tool.image.contact_sheet import main as _contact_sheet_main
 from hatch_pet_tool.image.input_image import DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
 from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, pixelize_image
+from hatch_pet_tool.image.subject import subject_problem
 from hatch_pet_tool.image.validate import main as _validate_main
+from hatch_pet_tool.pipeline.errors import PipelineError, normalize_error, write_failure_summary
 
 import sys
 
@@ -96,100 +98,124 @@ def run_image_pipeline(
     max_input_side: int = DEFAULT_MAX_INPUT_SIDE,
     colors: int = DEFAULT_COLORS,
     force: bool = False,
+    allow_existing_run_dir: bool = False,
+    extra_summary: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if not image_path.is_file():
-        raise SystemExit(f"input image not found: {image_path}")
-    if run_dir.exists() and any(run_dir.iterdir()) and not force:
-        raise SystemExit(f"{run_dir} already exists and is not empty; pass --force")
-
     frames_root = run_dir / "frames"
     final_dir = run_dir / "final"
     input_dir = run_dir / "input"
     qa_dir = run_dir / "qa"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    input_dir.mkdir(parents=True, exist_ok=True)
-    qa_dir.mkdir(parents=True, exist_ok=True)
-    clean_input = input_dir / "clean.png"
-    preprocess = preprocess_input_image(
-        image_path=image_path,
-        output_path=clean_input,
-        crop=crop,
-        remove_bg=remove_bg,
-        max_side=max_input_side,
-    )
-    pixelized_input = input_dir / "pixelized.png"
-    pixelize = pixelize_image(
-        image_path=clean_input,
-        output_path=pixelized_input,
-        colors=colors,
-    )
+    try:
+        if not image_path.is_file():
+            raise PipelineError(
+                "input",
+                "INPUT_NOT_FOUND",
+                f"input image not found: {image_path}",
+                "Check the image path and run the command again.",
+            )
+        if run_dir.exists() and any(run_dir.iterdir()) and not force and not allow_existing_run_dir:
+            raise PipelineError(
+                "setup",
+                "OUTPUT_EXISTS",
+                f"{run_dir} already exists and is not empty; pass --force",
+                "Use --force or choose a different --output-dir.",
+            )
 
-    request_path = write_request(
-        run_dir=run_dir,
-        image_path=image_path,
-        pet_id=pet_id,
-        display_name=display_name,
-        description=description,
-        clean_image_path=clean_input,
-        pixelized_image_path=pixelized_input,
-        preprocess=preprocess,
-        pixelize=pixelize,
-    )
-    frames_manifest = generate_algorithmic_frames(pixelized_input, frames_root)
-    write_json(frames_root / "frames-manifest.json", frames_manifest)
+        final_dir.mkdir(parents=True, exist_ok=True)
+        input_dir.mkdir(parents=True, exist_ok=True)
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        clean_input = input_dir / "clean.png"
+        preprocess = preprocess_input_image(
+            image_path=image_path,
+            output_path=clean_input,
+            crop=crop,
+            remove_bg=remove_bg,
+            max_side=max_input_side,
+        )
+        problem = subject_problem(preprocess["subject"], remove_bg=remove_bg)
+        if problem is not None:
+            raise problem
 
-    atlas = compose_from_frames(frames_root)
-    spritesheet_png = final_dir / "spritesheet.png"
-    spritesheet_webp = final_dir / "spritesheet.webp"
-    save_outputs(atlas, spritesheet_png, spritesheet_webp)
+        pixelized_input = input_dir / "pixelized.png"
+        pixelize = pixelize_image(
+            image_path=clean_input,
+            output_path=pixelized_input,
+            colors=colors,
+        )
 
-    validation_path = final_dir / "validation.json"
-    _run_module_main(
-        _validate_main,
-        [
-            "hatch-pet-tool validate",
-            str(spritesheet_webp),
-            "--json-out",
-            str(validation_path),
-        ],
-    )
+        request_path = write_request(
+            run_dir=run_dir,
+            image_path=image_path,
+            pet_id=pet_id,
+            display_name=display_name,
+            description=description,
+            clean_image_path=clean_input,
+            pixelized_image_path=pixelized_input,
+            preprocess=preprocess,
+            pixelize=pixelize,
+        )
+        frames_manifest = generate_algorithmic_frames(pixelized_input, frames_root)
+        write_json(frames_root / "frames-manifest.json", frames_manifest)
 
-    contact_sheet = qa_dir / "contact-sheet.png"
-    _run_module_main(
-        _contact_sheet_main,
-        [
-            "hatch-pet-tool contact-sheet",
-            str(spritesheet_webp),
-            "--output",
-            str(contact_sheet),
-        ],
-    )
+        atlas = compose_from_frames(frames_root)
+        spritesheet_png = final_dir / "spritesheet.png"
+        spritesheet_webp = final_dir / "spritesheet.webp"
+        save_outputs(atlas, spritesheet_png, spritesheet_webp)
 
-    flutter_result = export_flutter_asset(
-        spritesheet=spritesheet_webp,
-        output_dir=flutter_output_dir,
-        pet_id=pet_id,
-        display_name=display_name,
-        description=description,
-        force=force,
-    )
+        validation_path = final_dir / "validation.json"
+        _run_module_main(
+            _validate_main,
+            [
+                "hatch-pet-tool validate",
+                str(spritesheet_webp),
+                "--json-out",
+                str(validation_path),
+            ],
+        )
 
-    summary = {
-        "ok": True,
-        "run_dir": str(run_dir),
-        "request": str(request_path),
-        "clean_input": str(clean_input),
-        "pixelized_input": str(pixelized_input),
-        "preprocess": preprocess,
-        "pixelize": pixelize,
-        "spritesheet": str(spritesheet_webp),
-        "validation": str(validation_path),
-        "contact_sheet": str(contact_sheet),
-        "flutter_manifest": str(flutter_result["manifest"]),
-        "flutter_spritesheet": str(flutter_result["spritesheet"]),
-    }
-    write_json(qa_dir / "run-summary.json", summary)
-    return summary
+        contact_sheet = qa_dir / "contact-sheet.png"
+        _run_module_main(
+            _contact_sheet_main,
+            [
+                "hatch-pet-tool contact-sheet",
+                str(spritesheet_webp),
+                "--output",
+                str(contact_sheet),
+            ],
+        )
+
+        flutter_result = export_flutter_asset(
+            spritesheet=spritesheet_webp,
+            output_dir=flutter_output_dir,
+            pet_id=pet_id,
+            display_name=display_name,
+            description=description,
+            force=force,
+        )
+
+        summary = {
+            "ok": True,
+            "run_dir": str(run_dir),
+            "request": str(request_path),
+            "clean_input": str(clean_input),
+            "pixelized_input": str(pixelized_input),
+            "preprocess": preprocess,
+            "pixelize": pixelize,
+            "spritesheet": str(spritesheet_webp),
+            "validation": str(validation_path),
+            "contact_sheet": str(contact_sheet),
+            "flutter_manifest": str(flutter_result["manifest"]),
+            "flutter_spritesheet": str(flutter_result["spritesheet"]),
+        }
+        if extra_summary:
+            summary.update(extra_summary)
+        write_json(qa_dir / "run-summary.json", summary)
+        return summary
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        error = normalize_error(exc, stage="run-image")
+        return write_failure_summary(run_dir=run_dir, error=error, extra=extra_summary)
 
 
 def main() -> None:
@@ -237,7 +263,9 @@ def main() -> None:
         colors=args.colors,
         force=args.force,
     )
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if not result.get("ok"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

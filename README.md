@@ -14,6 +14,7 @@ python -m pip install -e .[dev]
 
 ```powershell
 hatch-pet-tool run-image --image .\input\beads.png --pet-id beads-cat --display-name "Beads Cat"
+hatch-pet-tool run-beads --images .\input\a.jpg .\input\b.webp .\input\c.png --pet-id beads-cat
 hatch-pet-tool run-image --image .\input\beads.jpg --remove-bg auto
 hatch-pet-tool run-image --image .\input\beads.webp --crop 120,80,640,640 --remove-bg "#FFFFFF"
 hatch-pet-tool run-image --image .\input\beads.png --remove-bg none --max-input-side 768 --colors 16
@@ -24,7 +25,7 @@ hatch-pet-tool finalize --run-dir .\output\hatch-pet\calico-... --skip-package
 hatch-pet-tool export-flutter --run-dir .\output\hatch-pet\calico-...
 ```
 
-`run-image` is the default no-AI MVP path. It expects an input image that is
+`run-image` is the default single-image no-AI MVP entrypoint. It expects an input image that is
 already pixel-art or bead-art styled. The tool cleans the input, extracts the
 visible pixel/bead subject, normalizes it into a transparent `192x208` hatch-pet
 cell, creates algorithmic placeholder animation frames, validates the hatch-pet
@@ -45,6 +46,14 @@ caps visible colors with `--colors`, and centers the result in the hatch-pet
 cell. The first version does not perform perspective correction, grid-line
 detection, or round bead reconstruction from real-world photos.
 
+`run-beads` is the multi-image entrypoint. In this first version it does not
+fuse images; it preprocesses each candidate, scores the visible subject, chooses
+one `primary_image`, then runs the same `run-image` pipeline.
+
+Both commands write `qa/run-summary.json`. Failed runs write `ok: false` with a
+stable `error_code`, readable message, and suggested fix such as using manual
+`--crop` or a cleaner background.
+
 `export-flutter` writes to `output/flutter-assets/<pet_id>/` by default. It does
 not write into the Todolist project. Treat
 `D:\Trae_File\flutter_file\todolist` as a read-only integration reference unless
@@ -52,6 +61,21 @@ the user explicitly grants write permission.
 
 `generate-images` is legacy/optional. It is not part of the default no-AI main
 flow and requires explicit API credentials if used.
+
+## Local Samples
+
+Real bead photos should stay local. Put them under `samples/local/` or
+`output/samples/`; both generated outputs and local samples are ignored by Git.
+Use `samples/manifest.example.json` as a template, then batch-check a local
+manifest with:
+
+```powershell
+python scripts\run_sample_manifest.py --manifest samples\manifest.local.json --force
+```
+
+The first sample baseline should cover 10-20 images across white backgrounds,
+tabletop backgrounds, tilted photos, strong shadows, multiple bead objects,
+partial crops, and PNG/JPG/WebP formats.
 
 ## Output Contract
 
@@ -82,7 +106,7 @@ Flutter exports use a Todolist-compatible manifest:
 
 - `src/hatch_pet_tool/`: installable Python package and CLI.
 - `src/hatch_pet_tool/pipeline/`: run preparation, status, record, finalize,
-  repair, mirroring, and optional Codex packaging.
+  repair, mirroring, `run-image`, `run-beads`, and optional Codex packaging.
 - `src/hatch_pet_tool/image/`: frame extraction, atlas composition, validation,
   contact sheets, and preview videos.
 - `src/hatch_pet_tool/flutter/`: Flutter asset export.

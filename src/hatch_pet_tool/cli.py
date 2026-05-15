@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 COMMANDS = {
     "prepare": "hatch_pet_tool.pipeline.prepare",
+    "run-beads": "hatch_pet_tool.pipeline.run_beads",
     "run-image": "hatch_pet_tool.pipeline.run_image",
     "status": "hatch_pet_tool.pipeline.status",
     "record": "hatch_pet_tool.pipeline.record",

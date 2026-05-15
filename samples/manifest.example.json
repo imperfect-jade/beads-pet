@@ -1,0 +1,19 @@
+{
+  "samples": [
+    {
+      "id": "white-front",
+      "image": "samples/local/white-front.png",
+      "notes": "White background, front-facing bead subject."
+    },
+    {
+      "id": "tabletop",
+      "image": "samples/local/tabletop.jpg",
+      "notes": "Desk or tabletop background."
+    },
+    {
+      "id": "tilted-shadow",
+      "image": "samples/local/tilted-shadow.webp",
+      "notes": "Tilted capture with visible shadow."
+    }
+  ]
+}

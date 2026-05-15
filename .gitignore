@@ -21,6 +21,8 @@ ENV/
 
 # Local generated pet outputs
 output/
+samples/local/
+samples/manifest.local.json
 *.response.json
 
 # Local Codex guidance generated for this workspace

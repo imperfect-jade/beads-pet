@@ -8,6 +8,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from hatch_pet_tool.image.subject import analyze_subject
+
 DEFAULT_MAX_INPUT_SIDE = 1024
 BACKGROUND_DISTANCE_THRESHOLD = 36.0
 SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -135,6 +137,7 @@ def preprocess_input_image(
     image = resize_longest_edge(image, max_side)
     resized_size = [image.width, image.height]
     image, background_info = remove_background(image, remove_bg)
+    subject_info = analyze_subject(image)
     image = crop_to_subject(image)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -148,4 +151,5 @@ def preprocess_input_image(
         "resized_size": resized_size,
         "final_size": [image.width, image.height],
         "remove_bg": background_info,
+        "subject": subject_info,
     }
