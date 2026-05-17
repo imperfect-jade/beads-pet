@@ -16,8 +16,8 @@ from hatch_pet_tool.flutter.export import export_flutter_asset
 from hatch_pet_tool.image.algorithmic import generate_algorithmic_frames
 from hatch_pet_tool.image.compose import compose_from_frames, save_outputs
 from hatch_pet_tool.image.contact_sheet import main as _contact_sheet_main
-from hatch_pet_tool.image.input_image import DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
-from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, pixelize_image
+from hatch_pet_tool.image.input_image import BACKGROUND_DISTANCE_THRESHOLD, DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
+from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, DEFAULT_PADDING, pixelize_image
 from hatch_pet_tool.image.subject import subject_problem
 from hatch_pet_tool.image.validate import main as _validate_main
 from hatch_pet_tool.pipeline.errors import PipelineError, normalize_error, write_failure_summary
@@ -96,14 +96,20 @@ def run_image_pipeline(
     crop: str | None = None,
     remove_bg: str = "auto",
     max_input_side: int = DEFAULT_MAX_INPUT_SIDE,
+    bg_threshold: float = BACKGROUND_DISTANCE_THRESHOLD,
     colors: int = DEFAULT_COLORS,
+    subject_padding: int = DEFAULT_PADDING,
+    debug: bool = False,
     force: bool = False,
     allow_existing_run_dir: bool = False,
+    source_output_path: Path | None = None,
     extra_summary: dict[str, object] | None = None,
 ) -> dict[str, object]:
     frames_root = run_dir / "frames"
     final_dir = run_dir / "final"
     input_dir = run_dir / "input"
+    preprocess_dir = run_dir / "preprocess"
+    reference_dir = run_dir / "reference"
     qa_dir = run_dir / "qa"
     try:
         if not image_path.is_file():
@@ -123,24 +129,35 @@ def run_image_pipeline(
 
         final_dir.mkdir(parents=True, exist_ok=True)
         input_dir.mkdir(parents=True, exist_ok=True)
+        preprocess_dir.mkdir(parents=True, exist_ok=True)
+        reference_dir.mkdir(parents=True, exist_ok=True)
         qa_dir.mkdir(parents=True, exist_ok=True)
-        clean_input = input_dir / "clean.png"
+        clean_input = preprocess_dir / "clean-subject.png"
+        background_removed = preprocess_dir / "background-removed.png"
         preprocess = preprocess_input_image(
             image_path=image_path,
             output_path=clean_input,
             crop=crop,
             remove_bg=remove_bg,
             max_side=max_input_side,
+            bg_threshold=bg_threshold,
+            source_output_path=source_output_path or input_dir / "source-00.png",
+            cropped_output_path=preprocess_dir / "cropped.png",
+            background_removed_output_path=background_removed,
+            mask_output_path=preprocess_dir / "mask.png",
+            debug_overlay_output_path=preprocess_dir / "debug-overlay.png",
+            debug=debug,
         )
         problem = subject_problem(preprocess["subject"], remove_bg=remove_bg)
         if problem is not None:
             raise problem
 
-        pixelized_input = input_dir / "pixelized.png"
+        pixelized_input = reference_dir / "pixel-reference.png"
         pixelize = pixelize_image(
             image_path=clean_input,
             output_path=pixelized_input,
             colors=colors,
+            padding=subject_padding,
         )
 
         request_path = write_request(
@@ -199,6 +216,8 @@ def run_image_pipeline(
             "request": str(request_path),
             "clean_input": str(clean_input),
             "pixelized_input": str(pixelized_input),
+            "background_removed": str(background_removed),
+            "pixel_reference": str(pixelized_input),
             "preprocess": preprocess,
             "pixelize": pixelize,
             "spritesheet": str(spritesheet_webp),
@@ -229,7 +248,10 @@ def main() -> None:
     parser.add_argument("--crop", default="", help="Optional crop rectangle as x,y,w,h in source pixels.")
     parser.add_argument("--remove-bg", default="auto", help="Background removal: auto, none, or #RRGGBB.")
     parser.add_argument("--max-input-side", type=int, default=DEFAULT_MAX_INPUT_SIDE)
+    parser.add_argument("--bg-threshold", type=float, default=BACKGROUND_DISTANCE_THRESHOLD)
     parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
+    parser.add_argument("--subject-padding", type=int, default=DEFAULT_PADDING)
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -260,7 +282,10 @@ def main() -> None:
         crop=args.crop or None,
         remove_bg=args.remove_bg,
         max_input_side=args.max_input_side,
+        bg_threshold=args.bg_threshold,
         colors=args.colors,
+        subject_padding=args.subject_padding,
+        debug=args.debug,
         force=args.force,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))

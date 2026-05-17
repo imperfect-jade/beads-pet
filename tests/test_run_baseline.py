@@ -14,10 +14,11 @@ def _transparent_subject(path):
 
 
 def _complex_background(path):
-    image = Image.new("RGBA", (48, 48), (30, 160, 90, 255))
+    image = Image.new("RGBA", (48, 48), (80, 80, 80, 255))
     pixels = image.load()
-    for point in ((0, 0), (47, 0), (0, 47), (47, 47)):
-        pixels[point] = (0, 0, 0, 255)
+    for y in range(48):
+        for x in range(48):
+            pixels[x, y] = ((x * 5 + y * 3) % 255, (x * 7) % 255, (y * 9) % 255, 255)
     image.save(path)
 
 
@@ -62,6 +63,7 @@ def test_run_image_reports_complex_background(tmp_path):
         run_dir=tmp_path / "run",
         flutter_output_dir=tmp_path / "flutter",
         remove_bg="auto",
+        bg_threshold=0,
     )
 
     assert result["ok"] is False
@@ -69,9 +71,10 @@ def test_run_image_reports_complex_background(tmp_path):
     assert "背景过复杂" in result["message"]
 
 
-def test_run_image_reports_multiple_subjects(tmp_path):
+def test_run_image_keeps_largest_subject(tmp_path, monkeypatch):
     source = tmp_path / "multiple.png"
     _multiple_subjects(source)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     result = run_image_pipeline(
         image_path=source,
@@ -83,8 +86,8 @@ def test_run_image_reports_multiple_subjects(tmp_path):
         remove_bg="auto",
     )
 
-    assert result["ok"] is False
-    assert result["error_code"] == "MULTIPLE_SUBJECTS"
+    assert result["ok"] is True
+    assert result["preprocess"]["largest_component"]["removed_components"] == 1
 
 
 def test_run_beads_selects_best_candidate_and_exports_assets(tmp_path, monkeypatch):
@@ -102,12 +105,41 @@ def test_run_beads_selects_best_candidate_and_exports_assets(tmp_path, monkeypat
         run_dir=tmp_path / "run",
         flutter_output_dir=tmp_path / "flutter",
         remove_bg="auto",
+        bg_threshold=0,
         colors=8,
+        debug=True,
     )
 
     assert result["ok"] is True
     assert result["primary_image"] == str(good)
     assert len(result["candidate_images"]) == 2
     assert result["candidate_images"][0]["error_code"] == "COMPLEX_BACKGROUND"
+    assert (tmp_path / "run" / "input" / "source-00.png").is_file()
+    assert (tmp_path / "run" / "input" / "source-01.png").is_file()
+    assert (tmp_path / "run" / "input" / "source-primary.png").is_file()
+    assert (tmp_path / "run" / "input" / "candidates" / "01" / "mask.png").is_file()
     assert (tmp_path / "run" / "qa" / "run-summary.json").is_file()
     assert (tmp_path / "flutter" / "beads-candidate_hatch_pet.json").is_file()
+
+
+def test_run_image_debug_outputs_and_subject_padding(tmp_path, monkeypatch):
+    source = tmp_path / "subject.png"
+    _transparent_subject(source)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = run_image_pipeline(
+        image_path=source,
+        pet_id="debug-subject",
+        display_name="Debug Subject",
+        description="",
+        run_dir=tmp_path / "run",
+        flutter_output_dir=tmp_path / "flutter",
+        remove_bg="auto",
+        subject_padding=30,
+        debug=True,
+    )
+
+    assert result["ok"] is True
+    assert (tmp_path / "run" / "preprocess" / "mask.png").is_file()
+    assert (tmp_path / "run" / "preprocess" / "debug-overlay.png").is_file()
+    assert result["pixelize"]["padding"] == 30

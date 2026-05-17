@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from hatch_pet_tool.pipeline.errors import PipelineError
 
@@ -22,7 +22,7 @@ def _rgba_data(image: Image.Image):
     return rgba, rgba.getdata()
 
 
-def _component_stats(image: Image.Image) -> list[dict[str, Any]]:
+def component_stats(image: Image.Image) -> list[dict[str, Any]]:
     pixels = image.load()
     width, height = image.size
     visited = bytearray(width * height)
@@ -62,6 +62,7 @@ def _component_stats(image: Image.Image) -> list[dict[str, Any]]:
                     {
                         "pixels": count,
                         "bbox": [left, top, right + 1, bottom + 1],
+                        "seed": [start_x, start_y],
                     }
                 )
 
@@ -92,11 +93,12 @@ def analyze_subject(image: Image.Image) -> dict[str, Any]:
             "component_count": 0,
             "largest_component_ratio": 0.0,
             "unique_colors": 0,
+            "components": [],
         }
 
     bbox_width = bbox[2] - bbox[0]
     bbox_height = bbox[3] - bbox[1]
-    components = _component_stats(rgba)
+    components = component_stats(rgba)
     largest_pixels = int(components[0]["pixels"]) if components else visible_pixels
     return {
         "image_size": [rgba.width, rgba.height],
@@ -161,3 +163,64 @@ def score_subject(analysis: dict[str, Any]) -> float:
     edge_penalty = 18.0 if analysis["touches_edge"] else 0.0
     color_penalty = min(12.0, max(0, unique_colors - 64) / 16.0)
     return round(max(0.0, area_score + bbox_score + component_score - edge_penalty - color_penalty), 3)
+
+
+def alpha_mask(image: Image.Image) -> Image.Image:
+    rgba = image.convert("RGBA")
+    mask = Image.new("L", rgba.size, 0)
+    mask_pixels = mask.load()
+    pixels = rgba.load()
+    for y in range(rgba.height):
+        for x in range(rgba.width):
+            mask_pixels[x, y] = 255 if pixels[x, y][3] > 0 else 0
+    return mask
+
+
+def keep_largest_component(image: Image.Image) -> tuple[Image.Image, dict[str, Any]]:
+    rgba = image.convert("RGBA")
+    components = component_stats(rgba)
+    if not components:
+        return rgba, {"kept": False, "removed_components": 0, "kept_component": None}
+
+    kept = components[0]
+    seed_x, seed_y = kept["seed"]
+    source_pixels = rgba.load()
+    output = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+    output_pixels = output.load()
+    visited = bytearray(rgba.width * rgba.height)
+    queue: deque[tuple[int, int]] = deque([(seed_x, seed_y)])
+    visited[seed_y * rgba.width + seed_x] = 1
+
+    while queue:
+        x, y = queue.popleft()
+        output_pixels[x, y] = source_pixels[x, y]
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= rgba.width or ny >= rgba.height:
+                continue
+            index = ny * rgba.width + nx
+            if visited[index] or source_pixels[nx, ny][3] == 0:
+                continue
+            visited[index] = 1
+            queue.append((nx, ny))
+
+    return output, {
+        "kept": True,
+        "removed_components": max(0, len(components) - 1),
+        "kept_component": kept,
+        "component_count_before": len(components),
+    }
+
+
+def debug_overlay(base: Image.Image, processed: Image.Image, analysis: dict[str, Any]) -> Image.Image:
+    overlay = base.convert("RGBA")
+    mask = alpha_mask(processed)
+    tint = Image.new("RGBA", overlay.size, (0, 200, 90, 92))
+    transparent = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+    overlay.alpha_composite(Image.composite(tint, transparent, mask))
+    draw = ImageDraw.Draw(overlay)
+    bbox = analysis.get("bbox")
+    if bbox:
+        draw.rectangle(tuple(bbox), outline=(255, 40, 40, 255), width=2)
+    for component in analysis.get("components", [])[1:]:
+        draw.rectangle(tuple(component["bbox"]), outline=(255, 160, 0, 220), width=1)
+    return overlay

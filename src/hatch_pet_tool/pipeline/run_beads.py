@@ -8,8 +8,8 @@ from pathlib import Path
 
 from hatch_pet_tool.core.json_io import write_json
 from hatch_pet_tool.core.paths import default_flutter_output_dir, slugify
-from hatch_pet_tool.image.input_image import DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
-from hatch_pet_tool.image.pixelize import DEFAULT_COLORS
+from hatch_pet_tool.image.input_image import BACKGROUND_DISTANCE_THRESHOLD, DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
+from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, DEFAULT_PADDING
 from hatch_pet_tool.image.subject import score_subject, subject_problem
 from hatch_pet_tool.pipeline.errors import PipelineError, normalize_error, write_failure_summary
 from hatch_pet_tool.pipeline.run_image import default_run_dir, run_image_pipeline
@@ -19,9 +19,12 @@ def evaluate_candidate(
     *,
     image_path: Path,
     output_path: Path,
+    source_output_path: Path,
     crop: str | None,
     remove_bg: str,
     max_input_side: int,
+    bg_threshold: float,
+    debug: bool,
 ) -> dict[str, object]:
     try:
         if not image_path.is_file():
@@ -37,6 +40,13 @@ def evaluate_candidate(
             crop=crop,
             remove_bg=remove_bg,
             max_side=max_input_side,
+            bg_threshold=bg_threshold,
+            source_output_path=source_output_path,
+            cropped_output_path=output_path.parent / "cropped.png",
+            background_removed_output_path=output_path.parent / "background-removed.png",
+            mask_output_path=output_path.parent / "mask.png",
+            debug_overlay_output_path=output_path.parent / "debug-overlay.png",
+            debug=debug,
         )
         problem = subject_problem(preprocess["subject"], remove_bg=remove_bg)
         if problem is not None:
@@ -76,7 +86,10 @@ def run_beads_pipeline(
     crop: str | None = None,
     remove_bg: str = "auto",
     max_input_side: int = DEFAULT_MAX_INPUT_SIDE,
+    bg_threshold: float = BACKGROUND_DISTANCE_THRESHOLD,
     colors: int = DEFAULT_COLORS,
+    subject_padding: int = DEFAULT_PADDING,
+    debug: bool = False,
     force: bool = False,
 ) -> dict[str, object]:
     if not image_paths:
@@ -100,14 +113,17 @@ def run_beads_pipeline(
     candidates_dir = run_dir / "input" / "candidates"
     candidates: list[dict[str, object]] = []
     for index, image_path in enumerate(image_paths):
-        clean_path = candidates_dir / f"candidate_{index:02d}_clean.png"
+        clean_path = candidates_dir / f"{index:02d}" / "clean-subject.png"
         candidates.append(
             evaluate_candidate(
                 image_path=image_path,
                 output_path=clean_path,
+                source_output_path=run_dir / "input" / f"source-{index:02d}.png",
                 crop=crop,
                 remove_bg=remove_bg,
                 max_input_side=max_input_side,
+                bg_threshold=bg_threshold,
+                debug=debug,
             )
         )
 
@@ -142,9 +158,13 @@ def run_beads_pipeline(
         crop=crop,
         remove_bg=remove_bg,
         max_input_side=max_input_side,
+        bg_threshold=bg_threshold,
         colors=colors,
+        subject_padding=subject_padding,
+        debug=debug,
         force=force,
         allow_existing_run_dir=True,
+        source_output_path=run_dir / "input" / "source-primary.png",
         extra_summary=extra_summary,
     )
     if result.get("ok"):
@@ -163,7 +183,10 @@ def main() -> None:
     parser.add_argument("--crop", default="", help="Optional crop rectangle as x,y,w,h applied to every candidate.")
     parser.add_argument("--remove-bg", default="auto", help="Background removal: auto, none, or #RRGGBB.")
     parser.add_argument("--max-input-side", type=int, default=DEFAULT_MAX_INPUT_SIDE)
+    parser.add_argument("--bg-threshold", type=float, default=BACKGROUND_DISTANCE_THRESHOLD)
     parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
+    parser.add_argument("--subject-padding", type=int, default=DEFAULT_PADDING)
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -194,7 +217,10 @@ def main() -> None:
         crop=args.crop or None,
         remove_bg=args.remove_bg,
         max_input_side=args.max_input_side,
+        bg_threshold=args.bg_threshold,
         colors=args.colors,
+        subject_padding=args.subject_padding,
+        debug=args.debug,
         force=args.force,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -52,10 +52,14 @@ def test_run_image_pipeline_exports_flutter_assets(tmp_path, monkeypatch):
     )
 
     assert result["ok"] is True
-    assert (run_dir / "input" / "clean.png").is_file()
-    assert (run_dir / "input" / "pixelized.png").is_file()
-    assert result["clean_input"] == str(run_dir / "input" / "clean.png")
-    assert result["pixelized_input"] == str(run_dir / "input" / "pixelized.png")
+    assert (run_dir / "input" / "source-00.png").is_file()
+    assert (run_dir / "preprocess" / "cropped.png").is_file()
+    assert (run_dir / "preprocess" / "background-removed.png").is_file()
+    assert (run_dir / "reference" / "pixel-reference.png").is_file()
+    assert not (run_dir / "preprocess" / "mask.png").exists()
+    assert result["clean_input"] == str(run_dir / "preprocess" / "clean-subject.png")
+    assert result["pixelized_input"] == str(run_dir / "reference" / "pixel-reference.png")
+    assert result["pixel_reference"] == str(run_dir / "reference" / "pixel-reference.png")
     assert result["preprocess"]["remove_bg"]["mode"] == "auto"
     assert result["pixelize"]["colors"]["requested_colors"] == 8
     assert (run_dir / "final" / "spritesheet.webp").is_file()
@@ -72,4 +76,4 @@ def test_run_image_pipeline_exports_flutter_assets(tmp_path, monkeypatch):
     assert manifest["image"] == "beads-test_hatch_spritesheet.webp"
     assert manifest["actions"]["idle"] == {"row": 0, "frames": 6, "fps": 6}
     frames_manifest = json.loads((run_dir / "frames" / "frames-manifest.json").read_text(encoding="utf-8"))
-    assert frames_manifest["source_image"] == str(run_dir / "input" / "pixelized.png")
+    assert frames_manifest["source_image"] == str(run_dir / "reference" / "pixel-reference.png")
