@@ -1,6 +1,7 @@
 from PIL import Image, ImageDraw
 
 from hatch_pet_tool.image.input_image import (
+    _rim_cleanup,
     apply_crop,
     edge_background_color,
     load_input_image,
@@ -207,3 +208,87 @@ def test_preprocess_dog_sleep_style_keeps_large_body_instead_of_z(tmp_path):
     assert info["largest_component"]["kept_component"]["bbox"] == [95, 70, 169, 125]
     with Image.open(output) as cleaned:
         assert cleaned.size == (74, 55)
+
+
+def test_preprocess_auto_v2_cleans_large_subject_on_wood_background(tmp_path):
+    source = tmp_path / "wood.png"
+    output = tmp_path / "clean.png"
+    mask = tmp_path / "mask-refined.png"
+    contours = tmp_path / "contours-overlay.png"
+    image = Image.new("RGBA", (180, 140), (0, 0, 0, 255))
+    pixels = image.load()
+    for y in range(image.height):
+        for x in range(image.width):
+            pixels[x, y] = (210 + x // 6, 190 + y // 9, 155 + (x + y) // 40, 255)
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((10, 10, 170, 130), radius=8, fill=(185, 140, 70, 255), outline=(10, 10, 10, 255), width=8)
+    image.save(source)
+
+    info = preprocess_input_image(
+        image_path=source,
+        output_path=output,
+        remove_bg="auto",
+        bg_threshold=36,
+        refined_mask_output_path=mask,
+        contours_overlay_output_path=contours,
+        debug=True,
+    )
+
+    assert info["remove_bg"]["method"] == "opencv-grabcut-v2"
+    assert info["remove_bg"]["mask_visible_ratio"] < 0.9
+    assert mask.is_file()
+    assert contours.is_file()
+    with Image.open(output) as cleaned:
+        assert cleaned.getbbox() is not None
+
+
+def test_preprocess_rim_cleanup_removes_low_saturation_edge_residue(tmp_path):
+    rim_mask = tmp_path / "rim-cleanup-mask.png"
+    image = Image.new("RGBA", (180, 140), (198, 190, 170, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((12, 12, 160, 124), radius=8, fill=(235, 210, 45, 255), outline=(5, 5, 5, 255), width=7)
+    draw.rectangle((130, 52, 172, 102), fill=(176, 172, 158, 255))
+    mask_image = Image.new("L", image.size, 0)
+    mask_draw = ImageDraw.Draw(mask_image)
+    mask_draw.rounded_rectangle((12, 12, 172, 124), radius=8, fill=255)
+
+    cleaned, rim_info, cleanup = _rim_cleanup(image, __import__("numpy").array(mask_image), background=(198, 190, 170))
+    cleanup.save(rim_mask)
+
+    assert rim_info["enabled"] is True
+    assert rim_info["removed_pixels"] > 0
+    assert rim_mask.is_file()
+    assert cleaned[60, 171] == 0
+    assert cleaned[60, 30] == 255
+
+
+def test_rim_cleanup_preserves_bright_subject_detail_near_edge():
+    image = Image.new("RGBA", (120, 90), (196, 186, 166, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((10, 10, 110, 80), radius=7, fill=(222, 180, 80, 255), outline=(5, 5, 5, 255), width=5)
+    draw.rectangle((13, 45, 60, 72), fill=(248, 248, 246, 255), outline=(15, 15, 15, 255), width=3)
+    mask_image = Image.new("L", image.size, 0)
+    mask_draw = ImageDraw.Draw(mask_image)
+    mask_draw.rounded_rectangle((10, 10, 110, 80), radius=7, fill=255)
+
+    cleaned, rim_info, cleanup = _rim_cleanup(image, __import__("numpy").array(mask_image), background=(196, 186, 166))
+
+    assert rim_info["removed_pixels"] >= 0
+    assert cleanup.getbbox() is None or cleaned[58, 20] == 255
+    assert cleaned[58, 25] == 255
+
+
+def test_rim_cleanup_rolls_back_when_candidate_deletes_too_much_subject():
+    image = Image.new("RGBA", (120, 90), (198, 190, 170, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((6, 6, 114, 84), radius=5, fill=(188, 181, 164, 255))
+    mask_image = Image.new("L", image.size, 0)
+    mask_draw = ImageDraw.Draw(mask_image)
+    mask_draw.rounded_rectangle((6, 6, 114, 84), radius=5, fill=255)
+
+    cleaned, rim_info, cleanup = _rim_cleanup(image, __import__("numpy").array(mask_image), background=(198, 190, 170))
+
+    assert rim_info["applied"] is False
+    assert rim_info["rollback_reason"] == "removed_ratio_too_high"
+    assert cleanup.getbbox() is not None
+    assert cleaned[10, 10] == 255

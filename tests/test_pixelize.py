@@ -62,6 +62,42 @@ def test_limit_colors_preserves_transparency_and_caps_visible_palette():
     assert info["quantized"] is True
 
 
+def test_limit_colors_keeps_saturated_small_details_with_heavy_outline():
+    image = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((6, 6, 73, 73), fill=(8, 8, 10, 255))
+    for offset in range(24):
+        tone = 160 + offset % 16
+        draw.rectangle((16 + offset, 16, 17 + offset, 58), fill=(tone, 112 + offset % 12, 62, 255))
+    draw.rectangle((30, 30, 38, 38), fill=(245, 42, 58, 255))
+    draw.rectangle((44, 30, 52, 38), fill=(42, 135, 235, 255))
+    draw.rectangle((30, 44, 38, 52), fill=(246, 190, 54, 255))
+
+    limited, info = limit_colors(image, 8)
+    visible = _visible_colors(limited)
+
+    assert info["palette_source"] == "clustered"
+    assert any(red > 190 and green < 90 for red, green, _blue in visible)
+    assert any(blue > 170 and red < 90 for red, _green, blue in visible)
+    assert any(red > 190 and green > 140 and blue < 100 for red, green, blue in visible)
+
+
+def test_pixelize_writes_palette_preview(tmp_path):
+    source = tmp_path / "clean.png"
+    output = tmp_path / "pixelized.png"
+    preview = tmp_path / "palette-preview.png"
+    image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((4, 4, 27, 27), fill=(210, 120, 60, 255))
+    draw.rectangle((10, 10, 16, 16), fill=(230, 30, 50, 255))
+    image.save(source)
+
+    info = pixelize_image(image_path=source, output_path=output, colors=4, palette_preview_path=preview)
+
+    assert preview.is_file()
+    assert info["colors"]["palette_preview"] == str(preview)
+
+
 def test_pixelize_image_writes_centered_cell(tmp_path):
     source = tmp_path / "clean.png"
     output = tmp_path / "pixelized.png"

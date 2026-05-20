@@ -40,6 +40,13 @@ def normalize_error(exc: BaseException, *, stage: str = "pipeline") -> PipelineE
             "未检测到主体。",
             "Check the input image, reduce background removal, or pass a manual --crop.",
         )
+    if "mask coverage is not reliable" in lower or "segmentation" in lower:
+        return PipelineError(
+            "preprocess",
+            "BACKGROUND_SEGMENTATION_FAILED",
+            text,
+            "Use --crop x,y,w,h, --remove-bg none, or choose a cleaner photo.",
+        )
     if "crop" in lower:
         return PipelineError(
             "preprocess",

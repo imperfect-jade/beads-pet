@@ -14,6 +14,7 @@ from hatch_pet_tool.core.json_io import write_json
 from hatch_pet_tool.core.paths import default_flutter_output_dir, slugify
 from hatch_pet_tool.flutter.export import export_flutter_asset
 from hatch_pet_tool.image.algorithmic import generate_algorithmic_frames
+from hatch_pet_tool.image.bead_grid import GridLowConfidenceError, build_grid_reference
 from hatch_pet_tool.image.compose import compose_from_frames, save_outputs
 from hatch_pet_tool.image.contact_sheet import main as _contact_sheet_main
 from hatch_pet_tool.image.input_image import BACKGROUND_DISTANCE_THRESHOLD, DEFAULT_MAX_INPUT_SIDE, preprocess_input_image
@@ -55,6 +56,10 @@ def write_request(
     pixelized_image_path: Path,
     preprocess: dict[str, object],
     pixelize: dict[str, object],
+    reference_mode: str,
+    reference_source: str,
+    grid: dict[str, object] | None = None,
+    grid_error: dict[str, object] | None = None,
 ) -> Path:
     request = {
         "pet_id": pet_id,
@@ -65,6 +70,8 @@ def write_request(
         "source_image": str(image_path),
         "clean_image": str(clean_image_path),
         "pixelized_image": str(pixelized_image_path),
+        "reference_mode": reference_mode,
+        "reference_source": reference_source,
         "preprocess": preprocess,
         "pixelize": pixelize,
         "atlas": {
@@ -80,9 +87,120 @@ def write_request(
             for row in ANIMATION_ROWS
         ],
     }
+    if grid is not None:
+        request["grid"] = grid
+    if grid_error is not None:
+        request["grid_error"] = grid_error
     request_path = run_dir / "pet_request.json"
     write_json(request_path, request)
     return request_path
+
+
+def _grid_error_summary(exc: GridLowConfidenceError) -> dict[str, object]:
+    return {
+        "error_code": "GRID_LOW_CONFIDENCE",
+        "message": str(exc),
+        "confidence": exc.confidence,
+        "details": exc.details,
+    }
+
+
+def build_reference(
+    *,
+    clean_input: Path,
+    reference_dir: Path,
+    preprocess_dir: Path,
+    reference_mode: str,
+    colors: int,
+    subject_padding: int,
+    grid_candidates: list[tuple[str, Path]] | None = None,
+    allow_pixelize_fallback: bool = True,
+) -> dict[str, object]:
+    pixel_reference = reference_dir / "pixel-reference.png"
+    mode = reference_mode.lower()
+    if mode not in {"auto", "grid", "pixelize"}:
+        raise PipelineError(
+            "reference",
+            "INVALID_REFERENCE_MODE",
+            f"unsupported reference mode: {reference_mode}",
+            "Use --reference-mode auto, grid, or pixelize.",
+        )
+
+    grid_candidates = grid_candidates or [("clean-subject", clean_input)]
+    candidate_results: list[dict[str, object]] = []
+    if mode in {"auto", "grid"}:
+        best_error: GridLowConfidenceError | None = None
+        for label, candidate_path in grid_candidates:
+            if not candidate_path.is_file():
+                continue
+            try:
+                grid_result = build_grid_reference(
+                    image_path=candidate_path,
+                    pixel_reference_path=pixel_reference,
+                    grid_sample_path=reference_dir / "grid-sample.png",
+                    debug_overlay_path=preprocess_dir / "grid-debug-overlay.png",
+                    colors=colors,
+                    padding=subject_padding,
+                    source_label=label,
+                )
+                candidate_results.append(
+                    {
+                        "source": label,
+                        "image": str(candidate_path),
+                        "ok": True,
+                        "grid": grid_result["grid"],
+                    }
+                )
+                write_json(preprocess_dir / "grid-candidates.json", candidate_results)
+                return {
+                    "reference_mode": mode,
+                    "reference_source": "grid",
+                    "pixel_reference": pixel_reference,
+                    "pixelize": grid_result["pixelize"],
+                    "grid": grid_result["grid"],
+                    "grid_error": None,
+                    "grid_candidates": candidate_results,
+                }
+            except GridLowConfidenceError as exc:
+                if best_error is None or exc.confidence > best_error.confidence:
+                    best_error = exc
+                candidate_results.append(
+                    {
+                        "source": label,
+                        "image": str(candidate_path),
+                        "ok": False,
+                        **_grid_error_summary(exc),
+                    }
+                )
+
+        write_json(preprocess_dir / "grid-candidates.json", candidate_results)
+        grid_error = _grid_error_summary(best_error or GridLowConfidenceError(confidence=0.0))
+        if mode == "grid" or not allow_pixelize_fallback:
+            raise PipelineError(
+                "reference",
+                "GRID_LOW_CONFIDENCE",
+                grid_error["message"],
+                "Use --crop x,y,w,h, choose a cleaner front-facing bead image, or use --reference-mode pixelize.",
+            )
+    else:
+        grid_error = None
+
+    pixelize = pixelize_image(
+        image_path=clean_input,
+        output_path=pixel_reference,
+        colors=colors,
+        padding=subject_padding,
+        palette_preview_path=reference_dir / "palette-preview.png",
+    )
+    return {
+        "reference_mode": mode,
+        "reference_source": "pixelize",
+        "pixel_reference": pixel_reference,
+        "pixelize": pixelize,
+        "grid": None,
+        "grid_error": grid_error,
+        "grid_candidates": candidate_results,
+    }
 
 
 def run_image_pipeline(
@@ -99,6 +217,7 @@ def run_image_pipeline(
     bg_threshold: float = BACKGROUND_DISTANCE_THRESHOLD,
     colors: int = DEFAULT_COLORS,
     subject_padding: int = DEFAULT_PADDING,
+    reference_mode: str = "auto",
     debug: bool = False,
     force: bool = False,
     allow_existing_run_dir: bool = False,
@@ -146,19 +265,42 @@ def run_image_pipeline(
             background_removed_output_path=background_removed,
             mask_output_path=preprocess_dir / "mask.png",
             debug_overlay_output_path=preprocess_dir / "debug-overlay.png",
+            refined_mask_output_path=preprocess_dir / "mask-refined.png",
+            contours_overlay_output_path=preprocess_dir / "contours-overlay.png",
+            rim_cleanup_mask_output_path=preprocess_dir / "rim-cleanup-mask.png",
             debug=debug,
         )
         problem = subject_problem(preprocess["subject"], remove_bg=remove_bg)
-        if problem is not None:
+        if problem is not None and reference_mode == "pixelize":
+            raise problem
+        if problem is not None and problem.error_code == "NO_SUBJECT":
             raise problem
 
-        pixelized_input = reference_dir / "pixel-reference.png"
-        pixelize = pixelize_image(
-            image_path=clean_input,
-            output_path=pixelized_input,
-            colors=colors,
-            padding=subject_padding,
-        )
+        grid_candidates = [
+            ("cropped", Path(str(preprocess["cropped_image"]))),
+            ("background-removed", Path(str(preprocess["background_removed_image"]))),
+            ("clean-subject", clean_input),
+        ]
+
+        try:
+            reference = build_reference(
+                clean_input=clean_input,
+                reference_dir=reference_dir,
+                preprocess_dir=preprocess_dir,
+                reference_mode=reference_mode,
+                colors=colors,
+                subject_padding=subject_padding,
+                grid_candidates=grid_candidates,
+                allow_pixelize_fallback=problem is None,
+            )
+        except PipelineError:
+            if problem is not None and reference_mode == "auto":
+                raise problem
+            raise
+        if problem is not None and reference["reference_source"] != "grid":
+            raise problem
+        pixelized_input = Path(str(reference["pixel_reference"]))
+        pixelize = reference["pixelize"]
 
         request_path = write_request(
             run_dir=run_dir,
@@ -170,6 +312,10 @@ def run_image_pipeline(
             pixelized_image_path=pixelized_input,
             preprocess=preprocess,
             pixelize=pixelize,
+            reference_mode=str(reference["reference_mode"]),
+            reference_source=str(reference["reference_source"]),
+            grid=reference["grid"] if isinstance(reference["grid"], dict) else None,
+            grid_error=reference["grid_error"] if isinstance(reference["grid_error"], dict) else None,
         )
         frames_manifest = generate_algorithmic_frames(pixelized_input, frames_root)
         write_json(frames_root / "frames-manifest.json", frames_manifest)
@@ -218,6 +364,8 @@ def run_image_pipeline(
             "pixelized_input": str(pixelized_input),
             "background_removed": str(background_removed),
             "pixel_reference": str(pixelized_input),
+            "reference_mode": reference["reference_mode"],
+            "reference_source": reference["reference_source"],
             "preprocess": preprocess,
             "pixelize": pixelize,
             "spritesheet": str(spritesheet_webp),
@@ -226,6 +374,12 @@ def run_image_pipeline(
             "flutter_manifest": str(flutter_result["manifest"]),
             "flutter_spritesheet": str(flutter_result["spritesheet"]),
         }
+        if reference["grid"] is not None:
+            summary["grid"] = reference["grid"]
+        if reference["grid_error"] is not None:
+            summary["grid_error"] = reference["grid_error"]
+        if reference.get("grid_candidates"):
+            summary["grid_candidates"] = reference["grid_candidates"]
         if extra_summary:
             summary.update(extra_summary)
         write_json(qa_dir / "run-summary.json", summary)
@@ -251,6 +405,12 @@ def main() -> None:
     parser.add_argument("--bg-threshold", type=float, default=BACKGROUND_DISTANCE_THRESHOLD)
     parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
     parser.add_argument("--subject-padding", type=int, default=DEFAULT_PADDING)
+    parser.add_argument(
+        "--reference-mode",
+        choices=("auto", "grid", "pixelize"),
+        default="auto",
+        help="Reference generation mode. auto tries bead-grid sampling and falls back to pixelize.",
+    )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -285,6 +445,7 @@ def main() -> None:
         bg_threshold=args.bg_threshold,
         colors=args.colors,
         subject_padding=args.subject_padding,
+        reference_mode=args.reference_mode,
         debug=args.debug,
         force=args.force,
     )

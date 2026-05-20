@@ -19,6 +19,8 @@ hatch-pet-tool run-image --image .\input\beads.jpg --remove-bg auto
 hatch-pet-tool run-image --image .\input\beads.webp --crop 120,80,640,640 --remove-bg "#FFFFFF"
 hatch-pet-tool run-image --image .\input\beads.png --remove-bg none --max-input-side 768 --colors 16 --debug
 hatch-pet-tool run-image --image .\input\beads.jpg --bg-threshold 48 --subject-padding 18
+hatch-pet-tool run-image --image .\input\beads.jpg --reference-mode grid --debug
+hatch-pet-tool run-image --image .\input\pixel.png --reference-mode pixelize
 hatch-pet-tool prepare --pet-name Calico --reference .\input\cat.png
 hatch-pet-tool status --run-dir .\output\hatch-pet\calico-...
 hatch-pet-tool record --run-dir .\output\hatch-pet\calico-... --job-id base --source <imagegen-output.png>
@@ -35,12 +37,12 @@ first version; later iterations can improve bead-grid detection, palette
 recovery, and motion quality.
 
 The `run-image` input preprocessor reads PNG/JPG/WebP, converts to RGBA, can crop
-with `--crop x,y,w,h`, scales large images by longest edge, and removes simple
+with `--crop x,y,w,h`, scales large images by longest edge, and removes
 backgrounds with `--remove-bg auto` or an explicit `#RRGGBB`. Auto background
-removal samples the image edges, uses `--bg-threshold` as the color tolerance,
-and keeps the largest connected subject after removal. Use `--remove-bg none`
-when the image already has a transparent background or the automatic cleanup is
-too aggressive.
+removal uses OpenCV GrabCut for difficult photo backgrounds, falls back to
+edge-connected color removal when that is safer, and keeps the largest connected
+subject after removal. Use `--remove-bg none` when the image already has a
+transparent background or the automatic cleanup is too aggressive.
 
 Each run writes explainable intermediate files:
 
@@ -52,17 +54,32 @@ Each run writes explainable intermediate files:
 - `final/spritesheet.webp`
 
 When `--debug` is enabled, the run also writes `preprocess/mask.png` and
-`preprocess/debug-overlay.png`. The pixel reference step is not a general
-photo-to-pixel-art filter: it uses the transparent alpha mask to crop the subject,
-preserves hard pixel/bead edges with nearest-neighbor scaling, optionally caps
-visible colors with `--colors`, and centers the result in the hatch-pet cell.
-Use `--subject-padding` to control the margin inside the `192x208` reference.
-The first version does not perform perspective correction, grid-line detection,
-or round bead reconstruction from real-world photos.
+`preprocess/debug-overlay.png`. OpenCV-based auto cleanup also writes
+`preprocess/mask-refined.png` and `preprocess/contours-overlay.png` when
+available. The default reference mode is
+`--reference-mode auto`: it first tries to detect a regular bead grid and sample
+the center of each bead, writing `reference/grid-sample.png` and
+`preprocess/grid-debug-overlay.png` plus `preprocess/grid-candidates.json`.
+Grid detection checks cropped, background-removed, and clean-subject candidates,
+so full template grids can be sampled even when they are not a single transparent
+subject. If confidence is low, auto mode falls back to the existing pixelize path
+so normal pixel-art inputs still work. Use `--reference-mode grid` when debugging
+bead-grid detection strictly; low confidence then fails with
+`GRID_LOW_CONFIDENCE`. Use `--reference-mode pixelize` to bypass grid detection.
+
+The pixelize fallback is not a general photo-to-pixel-art filter: it uses the
+transparent alpha mask to crop the subject, preserves hard pixel/bead edges with
+nearest-neighbor scaling, optionally caps visible colors with `--colors`, and
+centers the result in the hatch-pet cell. Use `--subject-padding` to control the
+margin inside the `192x208` reference. The grid path uses edge projections for
+template-like images and color profiles for simple synthetic grids. It supports
+0/90/180/270-degree rotation checks; full perspective correction is still out of
+scope for this tool-side MVP.
 
 `run-beads` is the multi-image entrypoint. In this first version it does not
 fuse images; it preprocesses each candidate, scores the visible subject, chooses
-one `primary_image`, then runs the same `run-image` pipeline.
+one `primary_image`, then runs the same `run-image` pipeline, including the
+selected `--reference-mode`.
 
 Both commands write `qa/run-summary.json`. Failed runs write `ok: false` with a
 stable `error_code`, readable message, and suggested fix such as using manual
@@ -128,7 +145,9 @@ Flutter exports use a Todolist-compatible manifest:
 - `src/hatch_pet_tool/image/algorithmic.py`: no-AI placeholder frame generation
   from one input image.
 - `src/hatch_pet_tool/image/input_image.py`: source image loading, cropping,
-  resizing, and simple background removal.
+  resizing, and OpenCV-assisted background removal.
+- `src/hatch_pet_tool/image/bead_grid.py`: conservative bead-grid detection,
+  center sampling, and grid debug overlays.
 - `src/hatch_pet_tool/image/pixelize.py`: pixel/bead subject extraction and
   normalization into a hatch-pet cell.
 - `docs/reference/`: sprite and QA contracts.

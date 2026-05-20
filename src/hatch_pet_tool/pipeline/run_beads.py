@@ -46,6 +46,9 @@ def evaluate_candidate(
             background_removed_output_path=output_path.parent / "background-removed.png",
             mask_output_path=output_path.parent / "mask.png",
             debug_overlay_output_path=output_path.parent / "debug-overlay.png",
+            refined_mask_output_path=output_path.parent / "mask-refined.png",
+            contours_overlay_output_path=output_path.parent / "contours-overlay.png",
+            rim_cleanup_mask_output_path=output_path.parent / "rim-cleanup-mask.png",
             debug=debug,
         )
         problem = subject_problem(preprocess["subject"], remove_bg=remove_bg)
@@ -89,6 +92,7 @@ def run_beads_pipeline(
     bg_threshold: float = BACKGROUND_DISTANCE_THRESHOLD,
     colors: int = DEFAULT_COLORS,
     subject_padding: int = DEFAULT_PADDING,
+    reference_mode: str = "auto",
     debug: bool = False,
     force: bool = False,
 ) -> dict[str, object]:
@@ -161,6 +165,7 @@ def run_beads_pipeline(
         bg_threshold=bg_threshold,
         colors=colors,
         subject_padding=subject_padding,
+        reference_mode=reference_mode,
         debug=debug,
         force=force,
         allow_existing_run_dir=True,
@@ -186,6 +191,12 @@ def main() -> None:
     parser.add_argument("--bg-threshold", type=float, default=BACKGROUND_DISTANCE_THRESHOLD)
     parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
     parser.add_argument("--subject-padding", type=int, default=DEFAULT_PADDING)
+    parser.add_argument(
+        "--reference-mode",
+        choices=("auto", "grid", "pixelize"),
+        default="auto",
+        help="Reference generation mode. auto tries bead-grid sampling and falls back to pixelize.",
+    )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -220,6 +231,7 @@ def main() -> None:
         bg_threshold=args.bg_threshold,
         colors=args.colors,
         subject_padding=args.subject_padding,
+        reference_mode=args.reference_mode,
         debug=args.debug,
         force=args.force,
     )

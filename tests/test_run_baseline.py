@@ -69,6 +69,8 @@ def test_run_image_reports_complex_background(tmp_path):
     assert result["ok"] is False
     assert result["error_code"] == "COMPLEX_BACKGROUND"
     assert "背景过复杂" in result["message"]
+    summary = json.loads((tmp_path / "run" / "qa" / "run-summary.json").read_text(encoding="utf-8"))
+    assert summary["message"] == result["message"]
 
 
 def test_run_image_keeps_largest_subject(tmp_path, monkeypatch):
@@ -143,3 +145,28 @@ def test_run_image_debug_outputs_and_subject_padding(tmp_path, monkeypatch):
     assert (tmp_path / "run" / "preprocess" / "mask.png").is_file()
     assert (tmp_path / "run" / "preprocess" / "debug-overlay.png").is_file()
     assert result["pixelize"]["padding"] == 30
+
+
+def test_run_image_high_threshold_does_not_destroy_output(tmp_path, monkeypatch):
+    source = tmp_path / "high-threshold.png"
+    image = Image.new("RGBA", (120, 100), (245, 245, 245, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 20, 100, 80), fill=(10, 10, 10, 255))
+    image.save(source)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = run_image_pipeline(
+        image_path=source,
+        pet_id="high-threshold",
+        display_name="High Threshold",
+        description="",
+        run_dir=tmp_path / "run",
+        flutter_output_dir=tmp_path / "flutter",
+        remove_bg="auto",
+        bg_threshold=200,
+    )
+
+    assert result["ok"] is True
+    assert result["preprocess"]["subject"]["visible_pixels"] > 0
+    with Image.open(tmp_path / "run" / "reference" / "pixel-reference.png") as reference:
+        assert reference.getbbox() is not None
