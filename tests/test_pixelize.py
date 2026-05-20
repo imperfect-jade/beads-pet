@@ -76,7 +76,7 @@ def test_limit_colors_keeps_saturated_small_details_with_heavy_outline():
     limited, info = limit_colors(image, 8)
     visible = _visible_colors(limited)
 
-    assert info["palette_source"] == "clustered"
+    assert info["palette_source"] == "perceptual-clustered"
     assert any(red > 190 and green < 90 for red, green, _blue in visible)
     assert any(blue > 170 and red < 90 for red, _green, blue in visible)
     assert any(red > 190 and green > 140 and blue < 100 for red, green, blue in visible)
@@ -85,6 +85,8 @@ def test_limit_colors_keeps_saturated_small_details_with_heavy_outline():
 def test_pixelize_writes_palette_preview(tmp_path):
     source = tmp_path / "clean.png"
     output = tmp_path / "pixelized.png"
+    base = tmp_path / "base-pixel-pet.png"
+    rendered = tmp_path / "rendered-pixel-pet.png"
     preview = tmp_path / "palette-preview.png"
     image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -92,10 +94,21 @@ def test_pixelize_writes_palette_preview(tmp_path):
     draw.rectangle((10, 10, 16, 16), fill=(230, 30, 50, 255))
     image.save(source)
 
-    info = pixelize_image(image_path=source, output_path=output, colors=4, palette_preview_path=preview)
+    info = pixelize_image(
+        image_path=source,
+        output_path=output,
+        colors=4,
+        base_output_path=base,
+        rendered_output_path=rendered,
+        palette_preview_path=preview,
+    )
 
+    assert base.is_file()
+    assert rendered.is_file()
     assert preview.is_file()
     assert info["colors"]["palette_preview"] == str(preview)
+    assert info["base_pixel_pet"] == str(base)
+    assert info["rendered_pixel_pet"] == str(rendered)
 
 
 def test_pixelize_image_writes_centered_cell(tmp_path):
@@ -109,6 +122,8 @@ def test_pixelize_image_writes_centered_cell(tmp_path):
     info = pixelize_image(image_path=source, output_path=output, colors=16)
 
     assert output.is_file()
+    assert info["base_size"][0] <= CELL_WIDTH
+    assert info["base_size"][1] <= CELL_HEIGHT
     with Image.open(output) as pixelized:
         assert pixelized.size == (CELL_WIDTH, CELL_HEIGHT)
         assert pixelized.getbbox() is not None

@@ -92,6 +92,8 @@ def run_beads_pipeline(
     bg_threshold: float = BACKGROUND_DISTANCE_THRESHOLD,
     colors: int = DEFAULT_COLORS,
     subject_padding: int = DEFAULT_PADDING,
+    render_style: str = "soft-pixel",
+    render_scale: int = 2,
     reference_mode: str = "auto",
     debug: bool = False,
     force: bool = False,
@@ -165,6 +167,8 @@ def run_beads_pipeline(
         bg_threshold=bg_threshold,
         colors=colors,
         subject_padding=subject_padding,
+        render_style=render_style,
+        render_scale=render_scale,
         reference_mode=reference_mode,
         debug=debug,
         force=force,
@@ -191,6 +195,13 @@ def main() -> None:
     parser.add_argument("--bg-threshold", type=float, default=BACKGROUND_DISTANCE_THRESHOLD)
     parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
     parser.add_argument("--subject-padding", type=int, default=DEFAULT_PADDING)
+    parser.add_argument(
+        "--render-style",
+        choices=("soft-pixel", "pixel"),
+        default="soft-pixel",
+        help="Reference rendering style. soft-pixel keeps pixel shapes with smoother edges.",
+    )
+    parser.add_argument("--render-scale", type=int, default=2, help="Internal render scale for soft-pixel output.")
     parser.add_argument(
         "--reference-mode",
         choices=("auto", "grid", "pixelize"),
@@ -231,6 +242,8 @@ def main() -> None:
         bg_threshold=args.bg_threshold,
         colors=args.colors,
         subject_padding=args.subject_padding,
+        render_style=args.render_style,
+        render_scale=args.render_scale,
         reference_mode=args.reference_mode,
         debug=args.debug,
         force=args.force,

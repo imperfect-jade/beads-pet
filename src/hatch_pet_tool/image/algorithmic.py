@@ -8,7 +8,11 @@ from PIL import Image
 
 from hatch_pet_tool.core.constants import ANIMATION_ROWS, CELL_HEIGHT, CELL_WIDTH
 
-def source_to_sprite(path: Path) -> Image.Image:
+def _resampling_for_style(render_style: str):
+    return Image.Resampling.BICUBIC if render_style == "soft-pixel" else Image.Resampling.NEAREST
+
+
+def source_to_sprite(path: Path, *, render_style: str = "soft-pixel") -> Image.Image:
     """Load one image and normalize it into a transparent 192x208 sprite frame."""
 
     with Image.open(path) as opened:
@@ -19,7 +23,7 @@ def source_to_sprite(path: Path) -> Image.Image:
         raise SystemExit(f"input image has no non-background pixels: {path}")
 
     sprite = image.crop(bbox)
-    sprite.thumbnail((CELL_WIDTH - 20, CELL_HEIGHT - 20), Image.Resampling.NEAREST)
+    sprite.thumbnail((CELL_WIDTH - 20, CELL_HEIGHT - 20), _resampling_for_style(render_style))
     frame = Image.new("RGBA", (CELL_WIDTH, CELL_HEIGHT), (0, 0, 0, 0))
     left = (CELL_WIDTH - sprite.width) // 2
     top = (CELL_HEIGHT - sprite.height) // 2
@@ -27,7 +31,14 @@ def source_to_sprite(path: Path) -> Image.Image:
     return frame
 
 
-def transform_frame(base: Image.Image, state: str, index: int, count: int) -> Image.Image:
+def transform_frame(
+    base: Image.Image,
+    state: str,
+    index: int,
+    count: int,
+    *,
+    render_style: str = "soft-pixel",
+) -> Image.Image:
     """Create one simple deterministic animation frame."""
 
     centered = Image.new("RGBA", (CELL_WIDTH, CELL_HEIGHT), (0, 0, 0, 0))
@@ -82,7 +93,7 @@ def transform_frame(base: Image.Image, state: str, index: int, count: int) -> Im
     width = max(1, round(cropped.width * scale_x))
     height = max(1, round(cropped.height * scale_y))
     if (width, height) != cropped.size:
-        cropped = cropped.resize((width, height), Image.Resampling.NEAREST)
+        cropped = cropped.resize((width, height), _resampling_for_style(render_style))
 
     left = (CELL_WIDTH - cropped.width) // 2 + offset_x
     top = (CELL_HEIGHT - cropped.height) // 2 + offset_y
@@ -90,17 +101,28 @@ def transform_frame(base: Image.Image, state: str, index: int, count: int) -> Im
     return centered
 
 
-def generate_algorithmic_frames(image_path: Path, frames_root: Path) -> dict[str, object]:
+def generate_algorithmic_frames(
+    image_path: Path,
+    frames_root: Path,
+    *,
+    render_style: str = "soft-pixel",
+) -> dict[str, object]:
     """Generate all hatch-pet animation rows under frames_root."""
 
-    base = source_to_sprite(image_path)
+    base = source_to_sprite(image_path, render_style=render_style)
     rows = []
     for animation in ANIMATION_ROWS:
         state_dir = frames_root / animation.state
         state_dir.mkdir(parents=True, exist_ok=True)
         files = []
         for index in range(animation.frames):
-            frame = transform_frame(base, animation.state, index, animation.frames)
+            frame = transform_frame(
+                base,
+                animation.state,
+                index,
+                animation.frames,
+                render_style=render_style,
+            )
             frame_path = state_dir / f"frame_{index:02d}.png"
             frame.save(frame_path)
             files.append(str(frame_path))
@@ -110,7 +132,8 @@ def generate_algorithmic_frames(image_path: Path, frames_root: Path) -> dict[str
                 "row": animation.row,
                 "frames": animation.frames,
                 "method": "algorithmic-placeholder",
+                "render_style": render_style,
                 "files": files,
             }
         )
-    return {"ok": True, "source_image": str(image_path), "rows": rows}
+    return {"ok": True, "source_image": str(image_path), "render_style": render_style, "rows": rows}

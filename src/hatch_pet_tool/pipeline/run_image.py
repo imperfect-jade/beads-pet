@@ -53,6 +53,8 @@ def write_request(
     display_name: str,
     description: str,
     clean_image_path: Path,
+    base_pixel_pet_path: Path,
+    rendered_pixel_pet_path: Path,
     pixelized_image_path: Path,
     preprocess: dict[str, object],
     pixelize: dict[str, object],
@@ -69,6 +71,8 @@ def write_request(
         "pipeline": "algorithmic-run-image",
         "source_image": str(image_path),
         "clean_image": str(clean_image_path),
+        "base_pixel_pet": str(base_pixel_pet_path),
+        "rendered_pixel_pet": str(rendered_pixel_pet_path),
         "pixelized_image": str(pixelized_image_path),
         "reference_mode": reference_mode,
         "reference_source": reference_source,
@@ -113,10 +117,14 @@ def build_reference(
     reference_mode: str,
     colors: int,
     subject_padding: int,
+    render_style: str = "soft-pixel",
+    render_scale: int = 2,
     grid_candidates: list[tuple[str, Path]] | None = None,
     allow_pixelize_fallback: bool = True,
 ) -> dict[str, object]:
     pixel_reference = reference_dir / "pixel-reference.png"
+    base_pixel_pet = reference_dir / "base-pixel-pet.png"
+    rendered_pixel_pet = reference_dir / "rendered-pixel-pet.png"
     mode = reference_mode.lower()
     if mode not in {"auto", "grid", "pixelize"}:
         raise PipelineError(
@@ -137,10 +145,15 @@ def build_reference(
                 grid_result = build_grid_reference(
                     image_path=candidate_path,
                     pixel_reference_path=pixel_reference,
+                    base_pixel_pet_path=base_pixel_pet,
+                    rendered_pixel_pet_path=rendered_pixel_pet,
                     grid_sample_path=reference_dir / "grid-sample.png",
                     debug_overlay_path=preprocess_dir / "grid-debug-overlay.png",
+                    palette_preview_path=reference_dir / "palette-preview.png",
                     colors=colors,
                     padding=subject_padding,
+                    render_style=render_style,
+                    render_scale=render_scale,
                     source_label=label,
                 )
                 candidate_results.append(
@@ -155,6 +168,8 @@ def build_reference(
                 return {
                     "reference_mode": mode,
                     "reference_source": "grid",
+                    "base_pixel_pet": base_pixel_pet,
+                    "rendered_pixel_pet": rendered_pixel_pet,
                     "pixel_reference": pixel_reference,
                     "pixelize": grid_result["pixelize"],
                     "grid": grid_result["grid"],
@@ -190,11 +205,17 @@ def build_reference(
         output_path=pixel_reference,
         colors=colors,
         padding=subject_padding,
+        base_output_path=base_pixel_pet,
+        rendered_output_path=rendered_pixel_pet,
+        render_style=render_style,
+        render_scale=render_scale,
         palette_preview_path=reference_dir / "palette-preview.png",
     )
     return {
         "reference_mode": mode,
         "reference_source": "pixelize",
+        "base_pixel_pet": base_pixel_pet,
+        "rendered_pixel_pet": rendered_pixel_pet,
         "pixel_reference": pixel_reference,
         "pixelize": pixelize,
         "grid": None,
@@ -217,6 +238,8 @@ def run_image_pipeline(
     bg_threshold: float = BACKGROUND_DISTANCE_THRESHOLD,
     colors: int = DEFAULT_COLORS,
     subject_padding: int = DEFAULT_PADDING,
+    render_style: str = "soft-pixel",
+    render_scale: int = 2,
     reference_mode: str = "auto",
     debug: bool = False,
     force: bool = False,
@@ -290,6 +313,8 @@ def run_image_pipeline(
                 reference_mode=reference_mode,
                 colors=colors,
                 subject_padding=subject_padding,
+                render_style=render_style,
+                render_scale=render_scale,
                 grid_candidates=grid_candidates,
                 allow_pixelize_fallback=problem is None,
             )
@@ -300,6 +325,8 @@ def run_image_pipeline(
         if problem is not None and reference["reference_source"] != "grid":
             raise problem
         pixelized_input = Path(str(reference["pixel_reference"]))
+        base_pixel_pet = Path(str(reference["base_pixel_pet"]))
+        rendered_pixel_pet = Path(str(reference["rendered_pixel_pet"]))
         pixelize = reference["pixelize"]
 
         request_path = write_request(
@@ -309,6 +336,8 @@ def run_image_pipeline(
             display_name=display_name,
             description=description,
             clean_image_path=clean_input,
+            base_pixel_pet_path=base_pixel_pet,
+            rendered_pixel_pet_path=rendered_pixel_pet,
             pixelized_image_path=pixelized_input,
             preprocess=preprocess,
             pixelize=pixelize,
@@ -317,7 +346,11 @@ def run_image_pipeline(
             grid=reference["grid"] if isinstance(reference["grid"], dict) else None,
             grid_error=reference["grid_error"] if isinstance(reference["grid_error"], dict) else None,
         )
-        frames_manifest = generate_algorithmic_frames(pixelized_input, frames_root)
+        frames_manifest = generate_algorithmic_frames(
+            pixelized_input,
+            frames_root,
+            render_style=render_style,
+        )
         write_json(frames_root / "frames-manifest.json", frames_manifest)
 
         atlas = compose_from_frames(frames_root)
@@ -361,11 +394,25 @@ def run_image_pipeline(
             "run_dir": str(run_dir),
             "request": str(request_path),
             "clean_input": str(clean_input),
+            "base_pixel_pet": str(base_pixel_pet),
+            "rendered_pixel_pet": str(rendered_pixel_pet),
             "pixelized_input": str(pixelized_input),
             "background_removed": str(background_removed),
             "pixel_reference": str(pixelized_input),
+            "palette": pixelize.get("colors", {}).get("palette"),
+            "palette_source": pixelize.get("colors", {}).get("palette_source"),
+            "palette_counts": pixelize.get("colors", {}).get("palette_counts"),
+            "color_restore": pixelize.get("colors"),
+            "render_style": render_style,
+            "render_scale": render_scale,
             "reference_mode": reference["reference_mode"],
             "reference_source": reference["reference_source"],
+            "grid_color_mode": pixelize.get("grid_color_mode"),
+            "raw_sample_colors": pixelize.get("raw_sample_colors"),
+            "final_sample_colors": pixelize.get("final_sample_colors"),
+            "changed_cells": pixelize.get("changed_cells"),
+            "template_background_removed_cells": pixelize.get("template_background_removed_cells"),
+            "opaque_cells": pixelize.get("opaque_cells"),
             "preprocess": preprocess,
             "pixelize": pixelize,
             "spritesheet": str(spritesheet_webp),
@@ -406,6 +453,13 @@ def main() -> None:
     parser.add_argument("--colors", type=int, default=DEFAULT_COLORS, help="Maximum visible colors in the normalized pixel subject.")
     parser.add_argument("--subject-padding", type=int, default=DEFAULT_PADDING)
     parser.add_argument(
+        "--render-style",
+        choices=("soft-pixel", "pixel"),
+        default="soft-pixel",
+        help="Reference rendering style. soft-pixel keeps pixel shapes with smoother edges.",
+    )
+    parser.add_argument("--render-scale", type=int, default=2, help="Internal render scale for soft-pixel output.")
+    parser.add_argument(
         "--reference-mode",
         choices=("auto", "grid", "pixelize"),
         default="auto",
@@ -445,6 +499,8 @@ def main() -> None:
         bg_threshold=args.bg_threshold,
         colors=args.colors,
         subject_padding=args.subject_padding,
+        render_style=args.render_style,
+        render_scale=args.render_scale,
         reference_mode=args.reference_mode,
         debug=args.debug,
         force=args.force,

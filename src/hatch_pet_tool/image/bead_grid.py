@@ -8,6 +8,7 @@ front-facing bead grid.
 
 from __future__ import annotations
 
+from collections import Counter, deque
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
@@ -16,7 +17,14 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, DEFAULT_PADDING, normalize_to_cell
+from hatch_pet_tool.image.color_restore import (
+    render_base_to_cell,
+    restore_colors,
+    restore_template_grid_colors,
+    save_palette_preview,
+    smooth_similar_neighbors,
+)
+from hatch_pet_tool.image.pixelize import DEFAULT_COLORS, DEFAULT_PADDING
 
 try:
     import cv2
@@ -70,6 +78,18 @@ class GridFit:
     y_axis: AxisFit
     method: str
     reject_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class GridEvidence:
+    ok: bool
+    reason: str | None
+    line_coverage: float
+    vertical_coverage: float
+    horizontal_coverage: float
+    destructive_downsample: bool
+    alpha_coverage: float
+    edge_density: float
 
 
 def _flattened_data(image: Image.Image):
@@ -372,13 +392,83 @@ def detect_grid(image: Image.Image) -> GridFit | None:
     return max(near_best, key=sort_key)
 
 
-def _sample_region_color(image: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-    region = image.crop(box).convert("RGBA")
-    pixels = [pixel for pixel in _flattened_data(region) if pixel[3] > 0]
+def _line_coverage(edge_image, *, axis: str, divisions: int, length: int) -> float:
+    if divisions <= 1:
+        return 0.0
+    values: list[float] = []
+    for index in range(1, divisions):
+        position = round(index * length / divisions)
+        if axis == "x":
+            left = max(0, position - 1)
+            right = min(edge_image.shape[1], position + 2)
+            if right <= left:
+                continue
+            window = edge_image[:, left:right]
+        else:
+            top = max(0, position - 1)
+            bottom = min(edge_image.shape[0], position + 2)
+            if bottom <= top:
+                continue
+            window = edge_image[top:bottom, :]
+        values.append(float(np.count_nonzero(window)) / float(window.size))
+    if not values:
+        return 0.0
+    strong_lines = [value for value in values if value >= 0.08]
+    return len(strong_lines) / len(values)
+
+
+def grid_evidence(fit: GridFit) -> GridEvidence:
+    if cv2 is None or np is None:
+        return GridEvidence(
+            ok=True,
+            reason=None,
+            line_coverage=1.0,
+            vertical_coverage=1.0,
+            horizontal_coverage=1.0,
+            destructive_downsample=False,
+            alpha_coverage=1.0,
+            edge_density=0.0,
+        )
+
+    left, top, right, bottom = fit.bbox
+    crop = fit.image.crop((left, top, right, bottom)).convert("RGBA")
+    rgba = np.array(crop)
+    alpha = rgba[:, :, 3]
+    alpha_coverage = float(np.count_nonzero(alpha)) / float(alpha.size)
+    gray = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 40, 140)
+    edge_density = float(np.count_nonzero(edges)) / float(edges.size)
+    vertical = _line_coverage(edges, axis="x", divisions=fit.columns, length=crop.width)
+    horizontal = _line_coverage(edges, axis="y", divisions=fit.rows, length=crop.height)
+    coverage = min(vertical, horizontal)
+    destructive_downsample = (
+        fit.method == "edge-projection"
+        and fit.columns * fit.rows < 900
+        and alpha_coverage > 0.72
+        and edge_density < 0.18
+        and coverage < 0.50
+    )
+    reason = None
+    if destructive_downsample:
+        reason = "pixel_art_like_false_positive"
+    elif coverage < 0.34 and fit.confidence < 0.78:
+        reason = "insufficient_grid_coverage"
+    return GridEvidence(
+        ok=reason is None,
+        reason=reason,
+        line_coverage=round(coverage, 3),
+        vertical_coverage=round(vertical, 3),
+        horizontal_coverage=round(horizontal, 3),
+        destructive_downsample=destructive_downsample,
+        alpha_coverage=round(alpha_coverage, 3),
+        edge_density=round(edge_density, 3),
+    )
+
+
+def _median_color(pixels: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
     if not pixels:
         return (0, 0, 0, 0)
-    pixels.sort(key=lambda pixel: pixel[3])
-    alpha = pixels[len(pixels) // 2][3]
+    alpha = sorted(pixel[3] for pixel in pixels)[len(pixels) // 2]
     reds = sorted(pixel[0] for pixel in pixels)
     greens = sorted(pixel[1] for pixel in pixels)
     blues = sorted(pixel[2] for pixel in pixels)
@@ -386,23 +476,259 @@ def _sample_region_color(image: Image.Image, box: tuple[int, int, int, int]) -> 
     return (reds[middle], greens[middle], blues[middle], alpha)
 
 
-def sample_grid(fit: GridFit) -> Image.Image:
+def _trim_photo_highlight_pixels(
+    pixels: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    if len(pixels) < 9:
+        return pixels
+    values = [max(pixel[:3]) for pixel in pixels]
+    low = sorted(values)[max(0, round(len(values) * 0.08) - 1)]
+    high = sorted(values)[min(len(values) - 1, round(len(values) * 0.92))]
+    filtered = [
+        pixel
+        for pixel in pixels
+        if low <= max(pixel[:3]) <= high
+        and not (max(pixel[:3]) >= 246 and max(pixel[:3]) - min(pixel[:3]) <= 16)
+        and not (max(pixel[:3]) <= 20)
+    ]
+    if len(filtered) >= max(3, len(pixels) // 4):
+        return filtered
+    return pixels
+
+
+def _sample_region_color(image: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    region = image.crop(box).convert("RGBA")
+    pixels = [pixel for pixel in _flattened_data(region) if pixel[3] > 0]
+    pixels = _trim_photo_highlight_pixels(pixels)
+    return _median_color(pixels)
+
+
+def _sample_template_pixels(
+    image: Image.Image,
+    boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    pixels: list[tuple[int, int, int, int]] = []
+    for box in boxes:
+        if box[2] <= box[0] or box[3] <= box[1]:
+            continue
+        region = image.crop(box).convert("RGBA")
+        pixels.extend(pixel for pixel in _flattened_data(region) if pixel[3] > 0)
+    return pixels
+
+
+def _filter_template_label_pixels(
+    pixels: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    if len(pixels) < 4:
+        return pixels
+    median = _median_color(pixels)
+    brightness = max(median[:3])
+    if brightness > 70:
+        filtered = [pixel for pixel in pixels if max(pixel[:3]) > 58]
+    else:
+        filtered = [
+            pixel
+            for pixel in pixels
+            if not (min(pixel[:3]) >= 164 and max(pixel[:3]) - min(pixel[:3]) <= 78)
+        ]
+    if len(filtered) >= max(2, len(pixels) // 3):
+        return filtered
+    return pixels
+
+
+def _template_color_bucket(pixel: tuple[int, int, int, int], *, step: int = 24) -> tuple[int, int, int]:
+    return tuple(min(255, max(0, round(channel / step) * step)) for channel in pixel[:3])
+
+
+def _dominant_template_color(pixels: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+    visible = [pixel for pixel in pixels if pixel[3] > 0]
+    if not visible:
+        return (0, 0, 0, 0)
+    buckets = Counter(_template_color_bucket(pixel) for pixel in visible)
+    dominant_bucket, _count = buckets.most_common(1)[0]
+    bucket_pixels = [pixel for pixel in visible if _template_color_bucket(pixel) == dominant_bucket]
+    if len(bucket_pixels) >= max(2, len(visible) // 5):
+        return _median_color(bucket_pixels)
+    return _median_color(visible)
+
+
+def _sample_template_cell_color(
+    crop: Image.Image,
+    cell_box: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = cell_box
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return (0, 0, 0, 0)
+
+    inset_x = max(2, round(width * 0.16))
+    inset_y = max(2, round(height * 0.16))
+    inner_box = (
+        max(0, left + inset_x),
+        max(0, top + inset_y),
+        min(crop.width, right - inset_x),
+        min(crop.height, bottom - inset_y),
+    )
+    pixels = _sample_template_pixels(crop, [inner_box])
+    if pixels:
+        return _dominant_template_color(pixels)
+    return _sample_cell_color(crop, inner_box)
+
+
+def _rgb_distance(left: tuple[int, int, int], right: tuple[int, int, int]) -> float:
+    return sqrt(
+        (left[0] - right[0]) ** 2
+        + (left[1] - right[1]) ** 2
+        + (left[2] - right[2]) ** 2
+    )
+
+
+def _template_background_color(base: Image.Image) -> tuple[int, int, int] | None:
+    rgba = base.convert("RGBA")
+    pixels = rgba.load()
+    edge_colors: list[tuple[int, int, int]] = []
+    for x in range(rgba.width):
+        for y in (0, rgba.height - 1):
+            red, green, blue, alpha = pixels[x, y]
+            if alpha > 0:
+                edge_colors.append((red, green, blue))
+    for y in range(rgba.height):
+        for x in (0, rgba.width - 1):
+            red, green, blue, alpha = pixels[x, y]
+            if alpha > 0:
+                edge_colors.append((red, green, blue))
+    if not edge_colors:
+        return None
+    buckets = Counter(_template_color_bucket((*color, 255)) for color in edge_colors)
+    background_bucket, _count = buckets.most_common(1)[0]
+    matching = [color for color in edge_colors if _template_color_bucket((*color, 255)) == background_bucket]
+    median = _median_color([(*color, 255) for color in matching])
+    return median[:3]
+
+
+def remove_template_background(base: Image.Image) -> tuple[Image.Image, dict[str, object]]:
+    rgba = base.convert("RGBA")
+    background = _template_background_color(rgba)
+    if background is None:
+        return rgba, {
+            "method": "edge-flood-fill",
+            "background_rgb": None,
+            "removed_cells": 0,
+            "opaque_cells": _visible_color_count(rgba),
+        }
+
+    pixels = rgba.load()
+    visited: set[tuple[int, int]] = set()
+    queue: deque[tuple[int, int]] = deque()
+
+    def is_background_cell(x: int, y: int) -> bool:
+        red, green, blue, alpha = pixels[x, y]
+        if alpha == 0:
+            return False
+        color = (red, green, blue)
+        if max(color) >= 238 and max(color) - min(color) <= 32:
+            return True
+        return _rgb_distance(color, background) <= 42.0
+
+    for x in range(rgba.width):
+        for y in (0, rgba.height - 1):
+            if is_background_cell(x, y):
+                queue.append((x, y))
+    for y in range(rgba.height):
+        for x in (0, rgba.width - 1):
+            if is_background_cell(x, y):
+                queue.append((x, y))
+
+    while queue:
+        x, y = queue.popleft()
+        if (x, y) in visited or not (0 <= x < rgba.width and 0 <= y < rgba.height):
+            continue
+        if not is_background_cell(x, y):
+            continue
+        visited.add((x, y))
+        queue.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
+
+    output = rgba.copy()
+    out_pixels = output.load()
+    for x, y in visited:
+        out_pixels[x, y] = (0, 0, 0, 0)
+    opaque_cells = sum(1 for _red, _green, _blue, alpha in _flattened_data(output) if alpha > 0)
+    return output, {
+        "method": "edge-flood-fill",
+        "background_rgb": list(background),
+        "removed_cells": len(visited),
+        "opaque_cells": opaque_cells,
+    }
+
+
+def _sample_cell_color(crop: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    color = _sample_region_color(crop, box)
+    if color[3] > 0:
+        return color
+    return _sample_region_color(
+        crop,
+        (
+            max(0, box[0] - 1),
+            max(0, box[1] - 1),
+            min(crop.width, box[2] + 1),
+            min(crop.height, box[3] + 1),
+        ),
+    )
+
+
+def _is_template_grid_fit(fit: GridFit, evidence: GridEvidence, source_label: str) -> bool:
+    if source_label != "cropped":
+        return False
+    left, top, right, bottom = fit.bbox
+    bbox_area = (right - left) * (bottom - top)
+    image_area = max(1, fit.image.width * fit.image.height)
+    bbox_ratio = bbox_area / image_area
+    return (
+        evidence.alpha_coverage >= 0.98
+        and bbox_ratio >= 0.88
+        and evidence.line_coverage >= 0.42
+        and evidence.edge_density <= 0.22
+        and fit.columns >= MIN_GRID_DIVISIONS
+        and fit.rows >= MIN_GRID_DIVISIONS
+    )
+
+
+def _visible_color_count(image: Image.Image) -> int:
+    return len(
+        {
+            (red, green, blue)
+            for red, green, blue, alpha in _flattened_data(image.convert("RGBA"))
+            if alpha > 0
+        }
+    )
+
+
+def _changed_pixel_count(left: Image.Image, right: Image.Image) -> int:
+    left_rgba = left.convert("RGBA")
+    right_rgba = right.convert("RGBA")
+    if left_rgba.size != right_rgba.size:
+        return -1
+    return sum(
+        1
+        for left_pixel, right_pixel in zip(_flattened_data(left_rgba), _flattened_data(right_rgba))
+        if left_pixel != right_pixel
+    )
+
+
+def sample_grid_base(fit: GridFit, *, template_mode: bool = False) -> Image.Image:
     left, top, right, bottom = fit.bbox
     crop = fit.image.crop((left, top, right, bottom)).convert("RGBA")
-    sample = Image.new(
-        "RGBA",
-        (fit.columns * GRID_PREVIEW_CELL, fit.rows * GRID_PREVIEW_CELL),
-        (0, 0, 0, 0),
-    )
-    draw = ImageDraw.Draw(sample)
+    sample = Image.new("RGBA", (fit.columns, fit.rows), (0, 0, 0, 0))
+    pixels = sample.load()
     for row in range(fit.rows):
         for column in range(fit.columns):
             x0 = column * fit.cell_width
             y0 = row * fit.cell_height
             x1 = (column + 1) * fit.cell_width
             y1 = (row + 1) * fit.cell_height
-            inset_x = max(1, int((x1 - x0) * 0.25))
-            inset_y = max(1, int((y1 - y0) * 0.25))
+            inset_x = max(1, int((x1 - x0) * 0.34))
+            inset_y = max(1, int((y1 - y0) * 0.34))
             box = (
                 max(0, int(round(x0)) + inset_x),
                 max(0, int(round(y0)) + inset_y),
@@ -416,14 +742,22 @@ def sample_grid(fit: GridFit) -> Image.Image:
                     min(crop.width, int(round(x1))),
                     min(crop.height, int(round(y1))),
                 )
-            color = _sample_region_color(crop, box)
-            px0 = column * GRID_PREVIEW_CELL
-            py0 = row * GRID_PREVIEW_CELL
-            draw.rectangle(
-                (px0, py0, px0 + GRID_PREVIEW_CELL - 1, py0 + GRID_PREVIEW_CELL - 1),
-                fill=color,
-            )
+            if template_mode:
+                full_box = (
+                    max(0, int(round(x0))),
+                    max(0, int(round(y0))),
+                    min(crop.width, int(round(x1))),
+                    min(crop.height, int(round(y1))),
+                )
+                pixels[column, row] = _sample_template_cell_color(crop, full_box)
+            else:
+                pixels[column, row] = _sample_cell_color(crop, box)
     return sample
+
+
+def sample_grid(fit: GridFit) -> Image.Image:
+    base = sample_grid_base(fit)
+    return base.resize((fit.columns * GRID_PREVIEW_CELL, fit.rows * GRID_PREVIEW_CELL), Image.Resampling.NEAREST)
 
 
 def grid_debug_overlay(fit: GridFit) -> Image.Image:
@@ -446,6 +780,7 @@ def grid_debug_overlay(fit: GridFit) -> Image.Image:
 
 
 def grid_metadata(fit: GridFit) -> dict[str, Any]:
+    evidence = grid_evidence(fit)
     return {
         "columns": fit.columns,
         "rows": fit.rows,
@@ -456,7 +791,15 @@ def grid_metadata(fit: GridFit) -> dict[str, Any]:
         "confidence": fit.confidence,
         "bbox": list(fit.bbox),
         "method": fit.method,
-        "rejectReason": fit.reject_reason,
+        "rejectReason": fit.reject_reason or evidence.reason,
+        "gridEvidence": {
+            "lineCoverage": evidence.line_coverage,
+            "verticalCoverage": evidence.vertical_coverage,
+            "horizontalCoverage": evidence.horizontal_coverage,
+            "destructiveDownsample": evidence.destructive_downsample,
+            "alphaCoverage": evidence.alpha_coverage,
+            "edgeDensity": evidence.edge_density,
+        },
         "axis": {
             "x": {
                 "score": round(fit.x_axis.score, 3),
@@ -476,10 +819,15 @@ def build_grid_reference(
     *,
     image_path: Path,
     pixel_reference_path: Path,
+    base_pixel_pet_path: Path,
+    rendered_pixel_pet_path: Path,
     grid_sample_path: Path,
     debug_overlay_path: Path,
+    palette_preview_path: Path | None = None,
     colors: int = DEFAULT_COLORS,
     padding: int = DEFAULT_PADDING,
+    render_style: str = "soft-pixel",
+    render_scale: int = 2,
     min_confidence: float = DEFAULT_GRID_MIN_CONFIDENCE,
     source_label: str = "clean-subject",
 ) -> dict[str, Any]:
@@ -496,31 +844,113 @@ def build_grid_reference(
         details["reason"] = "low_confidence"
         details["debugOverlay"] = str(debug_overlay_path)
         raise GridLowConfidenceError(confidence=fit.confidence, details=details)
+    evidence = grid_evidence(fit)
+    if not evidence.ok:
+        debug_overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        grid_debug_overlay(fit).save(debug_overlay_path)
+        details = grid_metadata(fit)
+        details["reason"] = evidence.reason
+        details["debugOverlay"] = str(debug_overlay_path)
+        raise GridLowConfidenceError(confidence=fit.confidence, details=details)
 
-    grid_sample = sample_grid(fit)
-    pixel_reference, pixelize = normalize_to_cell(grid_sample, colors=colors, padding=padding)
+    grid_color_mode = "grid-template" if _is_template_grid_fit(fit, evidence, source_label) else "photo-restore"
+    raw_base = sample_grid_base(fit, template_mode=grid_color_mode == "grid-template")
+    template_background: dict[str, object] | None = None
+    template_mask_path = grid_sample_path.with_name("grid-template-mask.png")
+    if grid_color_mode == "grid-template":
+        raw_base, template_background = remove_template_background(raw_base)
+    raw_sample_colors = _visible_color_count(raw_base)
+    if grid_color_mode == "grid-template":
+        base_pixel_pet, color_info = restore_template_grid_colors(raw_base, colors)
+        smoothing = {"changed_pixels": 0, "method": "skipped-grid-template"}
+    else:
+        restored_base, color_info = restore_colors(raw_base, colors)
+        base_pixel_pet, smoothing = smooth_similar_neighbors(restored_base)
+    final_sample_colors = _visible_color_count(base_pixel_pet)
+    changed_cells = _changed_pixel_count(raw_base, base_pixel_pet)
+    rendered, render_info = render_base_to_cell(
+        base_pixel_pet,
+        padding=padding,
+        render_style=render_style,
+        render_scale=render_scale,
+    )
+    raw_grid_sample_path = grid_sample_path.with_name("grid-raw-sample.png")
+    raw_grid_sample = raw_base.resize(
+        (raw_base.width * GRID_PREVIEW_CELL, raw_base.height * GRID_PREVIEW_CELL),
+        Image.Resampling.NEAREST,
+    )
+    grid_sample = base_pixel_pet.resize(
+        (base_pixel_pet.width * GRID_PREVIEW_CELL, base_pixel_pet.height * GRID_PREVIEW_CELL),
+        Image.Resampling.NEAREST,
+    )
     grid_sample_path.parent.mkdir(parents=True, exist_ok=True)
+    base_pixel_pet_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_pixel_pet_path.parent.mkdir(parents=True, exist_ok=True)
     pixel_reference_path.parent.mkdir(parents=True, exist_ok=True)
     debug_overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_grid_sample.save(raw_grid_sample_path)
+    if template_background is not None:
+        mask = Image.new("RGBA", raw_base.size, (0, 0, 0, 0))
+        mask_pixels = mask.load()
+        for y in range(raw_base.height):
+            for x in range(raw_base.width):
+                if raw_base.getpixel((x, y))[3] > 0:
+                    mask_pixels[x, y] = (255, 255, 255, 255)
+        mask.resize(
+            (raw_base.width * GRID_PREVIEW_CELL, raw_base.height * GRID_PREVIEW_CELL),
+            Image.Resampling.NEAREST,
+        ).save(template_mask_path)
     grid_sample.save(grid_sample_path)
-    pixel_reference.save(pixel_reference_path)
+    base_pixel_pet.save(base_pixel_pet_path)
+    rendered.save(rendered_pixel_pet_path)
+    rendered.save(pixel_reference_path)
     grid_debug_overlay(fit).save(debug_overlay_path)
+    palette_preview = save_palette_preview(color_info, palette_preview_path)
+    if palette_preview is not None:
+        color_info["palette_preview"] = palette_preview
 
     metadata = grid_metadata(fit)
     metadata.update(
         {
         "gridSample": str(grid_sample_path),
+        "rawGridSample": str(raw_grid_sample_path),
+        "basePixelPet": str(base_pixel_pet_path),
+        "renderedPixelPet": str(rendered_pixel_pet_path),
         "debugOverlay": str(debug_overlay_path),
         "previewCellSize": GRID_PREVIEW_CELL,
         "source": source_label,
         "sourceImage": str(image_path),
+        "gridColorMode": grid_color_mode,
+        "rawSampleColors": raw_sample_colors,
+        "finalSampleColors": final_sample_colors,
+        "changedCells": changed_cells,
         }
     )
+    if template_background is not None:
+        metadata["templateBackground"] = template_background
+        metadata["templateBackgroundRemovedCells"] = template_background["removed_cells"]
+        metadata["opaqueCells"] = template_background["opaque_cells"]
+        metadata["templateBackgroundMask"] = str(template_mask_path)
     return {
         "grid": metadata,
         "pixelize": {
-            "source_image": str(grid_sample_path),
+            "source_image": str(base_pixel_pet_path),
+            "base_pixel_pet": str(base_pixel_pet_path),
+            "rendered_pixel_pet": str(rendered_pixel_pet_path),
             "pixelized_image": str(pixel_reference_path),
-            **pixelize,
+            "source_size": [raw_base.width, raw_base.height],
+            "base_size": [base_pixel_pet.width, base_pixel_pet.height],
+            "colors": color_info,
+            "smoothing": smoothing,
+            "grid_color_mode": grid_color_mode,
+            "raw_sample_colors": raw_sample_colors,
+            "final_sample_colors": final_sample_colors,
+            "changed_cells": changed_cells,
+            "raw_grid_sample": str(raw_grid_sample_path),
+            "template_background": template_background,
+            "template_background_removed_cells": template_background["removed_cells"] if template_background else None,
+            "opaque_cells": template_background["opaque_cells"] if template_background else None,
+            "template_background_mask": str(template_mask_path) if template_background is not None else None,
+            **render_info,
         },
     }

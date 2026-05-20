@@ -21,6 +21,7 @@ hatch-pet-tool run-image --image .\input\beads.png --remove-bg none --max-input-
 hatch-pet-tool run-image --image .\input\beads.jpg --bg-threshold 48 --subject-padding 18
 hatch-pet-tool run-image --image .\input\beads.jpg --reference-mode grid --debug
 hatch-pet-tool run-image --image .\input\pixel.png --reference-mode pixelize
+hatch-pet-tool run-image --image .\input\beads.jpg --render-style soft-pixel --render-scale 2
 hatch-pet-tool prepare --pet-name Calico --reference .\input\cat.png
 hatch-pet-tool status --run-dir .\output\hatch-pet\calico-...
 hatch-pet-tool record --run-dir .\output\hatch-pet\calico-... --job-id base --source <imagegen-output.png>
@@ -49,6 +50,8 @@ Each run writes explainable intermediate files:
 - `input/source-00.png`
 - `preprocess/cropped.png`
 - `preprocess/background-removed.png`
+- `reference/base-pixel-pet.png`
+- `reference/rendered-pixel-pet.png`
 - `reference/pixel-reference.png`
 - `qa/contact-sheet.png`
 - `final/spritesheet.webp`
@@ -60,6 +63,10 @@ available. The default reference mode is
 `--reference-mode auto`: it first tries to detect a regular bead grid and sample
 the center of each bead, writing `reference/grid-sample.png` and
 `preprocess/grid-debug-overlay.png` plus `preprocess/grid-candidates.json`.
+Grid samples are restored into `reference/base-pixel-pet.png`, a low-resolution
+logical pet with transparent background and a limited palette, before being
+rendered into `reference/rendered-pixel-pet.png` and copied to
+`reference/pixel-reference.png`.
 Grid detection checks cropped, background-removed, and clean-subject candidates,
 so full template grids can be sampled even when they are not a single transparent
 subject. If confidence is low, auto mode falls back to the existing pixelize path
@@ -68,10 +75,14 @@ bead-grid detection strictly; low confidence then fails with
 `GRID_LOW_CONFIDENCE`. Use `--reference-mode pixelize` to bypass grid detection.
 
 The pixelize fallback is not a general photo-to-pixel-art filter: it uses the
-transparent alpha mask to crop the subject, preserves hard pixel/bead edges with
-nearest-neighbor scaling, optionally caps visible colors with `--colors`, and
+transparent alpha mask to crop the subject, creates the same low-resolution
+`base-pixel-pet.png`, restores colors into a limited perceptual palette, and
 centers the result in the hatch-pet cell. Use `--subject-padding` to control the
-margin inside the `192x208` reference. The grid path uses edge projections for
+margin inside the `192x208` reference. The default `--render-style soft-pixel`
+keeps the pixel silhouette but adds light edge antialiasing and smoother
+resampling; use `--render-style pixel` to keep the older hard nearest-neighbor
+look. `--render-scale` controls the internal smoothing scale and defaults to 2.
+The grid path uses edge projections for
 template-like images and color profiles for simple synthetic grids. It supports
 0/90/180/270-degree rotation checks; full perspective correction is still out of
 scope for this tool-side MVP.
@@ -148,6 +159,9 @@ Flutter exports use a Todolist-compatible manifest:
   resizing, and OpenCV-assisted background removal.
 - `src/hatch_pet_tool/image/bead_grid.py`: conservative bead-grid detection,
   center sampling, and grid debug overlays.
+- `src/hatch_pet_tool/image/color_restore.py`: finite palette restoration,
+  bead highlight/hole suppression, base pixel-pet creation, and soft-pixel
+  rendering helpers.
 - `src/hatch_pet_tool/image/pixelize.py`: pixel/bead subject extraction and
   normalization into a hatch-pet cell.
 - `docs/reference/`: sprite and QA contracts.
